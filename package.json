@@ -1,0 +1,17 @@
+{
+  "name": "redux-tanstackdb-effect",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.9",
+  "scripts": {
+    "build": "pnpm --recursive --if-present run build",
+    "lint": "eslint .",
+    "test": "pnpm --recursive --if-present run test",
+    "typecheck": "pnpm --recursive --if-present run typecheck"
+  },
+  "devDependencies": {
+    "@repo/eslint-config": "workspace:*",
+    "eslint": "^10.0.0",
+    "typescript": "^5.0.0"
+  }
+}
