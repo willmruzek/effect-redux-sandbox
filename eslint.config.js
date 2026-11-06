@@ -1,3 +1,3 @@
 import sharedConfig from '@repo/eslint-config';
 
-export default sharedConfig;
+export default [{ ignores: ['repos/**'] }, ...sharedConfig];
