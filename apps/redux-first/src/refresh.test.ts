@@ -93,6 +93,57 @@ afterEach(async () => {
 });
 
 describe('task refresh', () => {
+  test('refresh supersedes an older pending next page', async () => {
+    // Arrange: keep the old cursor request pending.
+    const app = store();
+    let finishPage: (value: TaskPage) => void = () => {
+      throw new Error('Page request did not start.');
+    };
+    const pending = app.dispatch(loadMoreTasks({
+      fetchPage: () => new Promise<TaskPage>((resolve) => {
+        finishPage = resolve;
+      }),
+    }));
+
+    // Act: refresh before the old page settles, then complete the old page.
+    await app.dispatch(refreshTasks({ fetchPage: async () => page('fresh', 'fresh-cursor', true) }));
+    finishPage(page('stale', null, false));
+    await pending;
+
+    // Assert: the stale page cannot alter the refreshed window or cursor.
+    expect(app.getState().result.ids).toEqual(['fresh']);
+    expect(app.getState().result.pageInfo.endCursor).toBe('fresh-cursor');
+  });
+
+  test('rejects a page without a cursor when it reports more pages', async () => {
+    // Arrange: the next page cannot be followed despite reporting more results.
+    const app = store();
+    const fetchPage = vi.fn<FetchPage>(async () => page('new', null, true));
+
+    // Act: request the next page.
+    await app.dispatch(loadMoreTasks({ fetchPage }));
+
+    // Assert: the invalid page does not alter the visible window or cursor.
+    expect(app.getState().request.status).toBe('error');
+    expect(app.getState().result.ids).toEqual(['old']);
+    expect(app.getState().result.pageInfo.endCursor).toBe('old-third');
+  });
+
+  test('rejects a page that repeats its cursor while reporting more pages', async () => {
+    // Arrange: the next page would not advance the existing cursor.
+    const app = store();
+    const fetchPage = vi.fn<FetchPage>(async () => page('new', 'old-third', true));
+
+    // Act: request the next page.
+    await app.dispatch(loadMoreTasks({ fetchPage }));
+
+    // Assert: the invalid page does not alter the visible window or cursor.
+    expect(app.getState().request.status).toBe('error');
+    expect(app.getState().result.ids).toEqual(['old']);
+    expect(app.getState().result.pageInfo.endCursor).toBe('old-third');
+    expect(fetchPage).toHaveBeenCalledTimes(1);
+  });
+
   test('retains local data when the refreshed page omits the task', async () => {
     // Arrange: independent stores start with the same remote task.
     const app = store();
@@ -137,5 +188,28 @@ describe('task refresh', () => {
     });
     expect(app.getState().result.ids).toEqual(['fresh', 'next']);
     expect(app.getState().result.loadedPages).toBe(2);
+    expect(app.getState().pagination.cursor).toBeNull();
+    expect(app.getState().pagination.exhausted).toBe(true);
+  });
+
+  test('retries a failed refresh from the first page without losing the previous window', async () => {
+    // Arrange: the refresh fails after a previously loaded window.
+    const app = store();
+    await app.dispatch(refreshTasks({ fetchPage: async () => { throw new Error('Offline'); } }));
+    expect(app.getState().result.ids).toEqual(['old']);
+    expect(app.getState().pagination.cursor).toBe('old-third');
+
+    // Act: the next-page action retries the failed refresh.
+    const fetchPage = vi.fn<FetchPage>(async () => page('fresh', null, false));
+    await app.dispatch(loadMoreTasks({ fetchPage }));
+
+    // Assert: retry restarts at the first page and replaces the old window.
+    expect(fetchPage).toHaveBeenCalledWith({
+      after: null,
+      query: initial().result.query,
+      fail: false,
+    });
+    expect(app.getState().result.ids).toEqual(['fresh']);
+    expect(app.getState().pagination.exhausted).toBe(true);
   });
 });

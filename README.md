@@ -15,6 +15,7 @@ Plans:
 - [Generate API reducers](plans/0007-generated-api-reducers.md) — IMPLEMENTED
 - [Local data in the frontend database](plans/0008-local-data-ownership.md) — IMPLEMENTED
 - [Manual query and mutation hooks](plans/0009-manual-request-hooks.md) — IMPLEMENTED
+- [Library-owned cursor pagination](plans/0010-library-cursor-pagination.md) — IMPLEMENTED
 
 Plan status describes the work for that stage, not any deferred roadmap included
 in its historical notes. Plan 0008 implements in-memory local-data ownership;
@@ -24,9 +25,9 @@ Base CRUD records the retained behavior; the other plans preserve the project's
 origins, completed ergonomics work, optional layers and deferred/removed features.
 Read them in numbered order: foundation, CRUD behavior, optional layer
 foundations, boilerplate reduction, consumer proof, shared reads, generated
-API reducers, local data, then manual request hooks. Each stage
-builds on or explicitly revises the preceding contracts; the sequence is a
-reconstructed design narrative, not an exact implementation chronology.
+API reducers, local data, manual request hooks, then cursor pagination.
+Each stage builds on or explicitly revises the preceding contracts; the sequence
+is a reconstructed design narrative, not an exact implementation chronology.
 
 The [layer comparison guide](docs/prove-the-layers.md) traces a read and an
 optimistic write through both apps and links runnable, headless inventory
@@ -54,7 +55,7 @@ examples that consume public package exports without tracker dependencies.
 | Stale-settlement protection | ✅ | ✅ | ✅ Explicit request ownership and latest-wins guards |
 | Decode and normalize responses | 🟡 Query function or schema integration | 🟡 Endpoint transforms or base query | ✅ App-defined contracts and shared entity utilities |
 | Transport choice | ✅ Query function | ✅ Base query or endpoint logic | ✅ GraphQL helper or app-supplied execution |
-| Pagination | ✅ Query and infinite-query patterns | ✅ Endpoint patterns | 📋 Planned — library-owned cursor workflow; currently app-owned |
+| Pagination | ✅ Query and infinite-query patterns | ✅ Endpoint patterns | ✅ Headless library-owned cursor workflow; app-owned transport and merges |
 | Domain rules and merge policy | 🟡 App-defined | 🟡 App-defined | ✅ Explicitly app-owned |
 
 **Legend:** ✅ Yes · ❌ No · 🟡 Kind of (see note) · 🧭 N/A (intentionally
@@ -75,9 +76,9 @@ public APIs, failure/cancellation behavior and test-first acceptance before work
 begins. Keep normalized entities store-owned and domain merge rules app-owned;
 this roadmap does not require an endpoint response cache.
 
-- [ ] **Library-owned cursor pagination:** move next-page execution, cursor
-  advancement and exhaustion handling into reusable library mechanics; apps
-  supply transport, cursor extraction and domain merge policy.
+- [x] **Library-owned cursor pagination:** reusable headless cursor mechanics
+  manage progression, refresh and exhaustion; apps supply transport, cursor
+  extraction and domain merge policy. See [plan 0010](plans/0010-library-cursor-pagination.md).
 - [ ] **Freshness and cache lifetime:** add configurable freshness and retention
   policies for normalized query membership/metadata, with explicit entity
   retention and eviction ownership.

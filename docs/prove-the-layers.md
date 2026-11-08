@@ -68,7 +68,7 @@ artifact validation are not claimed.
 | Stale-settlement protection | ✅ | ✅ | ✅ Explicit request ownership and latest-wins guards |
 | Decode and normalize responses | 🟡 Query function or schema integration | 🟡 Endpoint transforms or base query | ✅ App-defined contracts and shared entity utilities |
 | Transport choice | ✅ Query function | ✅ Base query or endpoint logic | ✅ GraphQL helper or app-supplied execution |
-| Pagination | ✅ Query and infinite-query patterns | ✅ Endpoint patterns | 📋 Planned — library-owned cursor workflow; currently app-owned |
+| Pagination | ✅ Query and infinite-query patterns | ✅ Endpoint patterns | ✅ Headless library-owned cursor workflow; app-owned transport and merges |
 | Domain rules and merge policy | 🟡 App-defined | 🟡 App-defined | ✅ Explicitly app-owned |
 
 **Legend:** ✅ Yes · ❌ No · 🟡 Kind of (see note) · 🧭 N/A (intentionally
@@ -82,6 +82,38 @@ Query. The repo uses Redux Toolkit, but does not use RTK Query. For feature
 details, see the official [TanStack Query overview](https://tanstack.com/query/latest/docs/framework/react/overview),
 [RTK Query overview](https://redux-toolkit.js.org/rtk-query/overview) and
 [RTK Query cache behavior](https://redux-toolkit.js.org/rtk-query/usage/cache-behavior).
+
+### Cursor pagination
+
+Each toolkit exports `createCursorPagination`, `CursorPaginationState` and
+`PaginationAction`. A definition supplies state accessors, cursor extraction
+and a domain merge, then installs its reducer alongside the generated API
+reducer. Its `next` and `refresh` Effects take a stable store service and a
+canonical identity covering filters, sort and source. `next` skips duplicate
+pending pages and exhausted chains; `restart: true` explicitly requests page
+one. `refresh` always requests page one and supersedes older pending pages.
+Failures and interruptions retain the last successful chain and allow retry.
+Only an eligible, valid page merges and advances the cursor in one reducer
+transition. A page claiming more results must supply a new non-null cursor.
+Cursor equality uses `Object.is`, so use scalar cursors or stable references.
+
+The `query` callback receives the chosen cursor and request metadata and can
+call a generated operation's `runWithResult`; its successful outcome contains
+the normalized result. It shares the same in-flight execution as `run` for the
+same operation, stable store-service object and canonical variables. `run`
+retains its original outcome shape. The optional `execute` callback instead
+accepts a cursor and abort signal and returns a page directly.
+
+Generated query success handlers run before `runWithResult` returns. When
+composing with pagination, do not independently merge the page in that handler:
+install the pagination reducer and merge there so stale or invalid pages cannot
+commit early. Validate cursor invariants during normalization as well if query
+success metadata must reflect a cursor error. The tracker apps follow this
+pattern. Their result `pageInfo` is the last successful response snapshot used
+to initialize hydrated state; pagination state is the execution authority.
+There is no pagination hook, automatic fetch or response cache. See the
+[public consumer tests](../tools/layer-examples/src/pagination.test.ts) for
+headless examples.
 
 ### Manual request hooks
 

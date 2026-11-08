@@ -147,6 +147,21 @@ function deferredResponse() {
 }
 
 describe('createRequestApi', () => {
+  test('returns the normalized result through result-bearing query execution', async () => {
+    // Arrange: use a generated query with a typed normalized response.
+    const { api, store, fetcher } = setup();
+
+    // Act: execute the result-bearing query.
+    const result = await Effect.runPromise(api.operations.person.runWithResult({
+      store,
+      variables: { id: '1' },
+      fetcher,
+    }));
+
+    // Assert: the successful result is available without reading store metadata.
+    expect(result).toEqual({ status: 'succeeded', result: { '1': { id: '1', name: 'Pat' } } });
+  });
+
   test('rejects duplicate operation keys before action types can collide', () => {
     // Arrange: query and mutation definitions attempt to use the same key.
     const define = () => createRequestApi({

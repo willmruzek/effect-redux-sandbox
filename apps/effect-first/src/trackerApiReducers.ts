@@ -1,4 +1,8 @@
-import { receiveNormalizedTaskPage } from '@repo/project-tracker';
+import {
+  receiveNormalizedTaskPage,
+  type NormalizedTaskPage
+} from '@repo/project-tracker';
+import { createCursorPagination } from '@repo/effect-store-toolkit';
 
 import { trackerApi } from './api';
 import type { TrackerApiState } from './trackerApiDefinition';
@@ -22,9 +26,8 @@ const tasks = trackerApi.operations.tasks.reducer({
       };
   },
 
-  onSuccess: (state, { requestId, result }) => {
-    Object.assign(state, receiveNormalizedTaskPage(state, { requestId, page: result }));
-  },
+  // Pagination commits the page only after validating ownership and cursor.
+  onSuccess: () => {},
 
   onFailure: (state, { requestId, error }) => {
     if (
@@ -43,9 +46,27 @@ const tasks = trackerApi.operations.tasks.reducer({
   }
 });
 
+export const taskPagination = createCursorPagination<TrackerApiState, string, NormalizedTaskPage>()({
+  name: 'trackerTasks',
+  getState: (state) => state.pagination,
+  setState: (state, pagination) => {
+    state.pagination = pagination;
+  },
+  pageInfo: (page) => ({
+    cursor: page.pageInfo.endCursor,
+    hasNextPage: page.pageInfo.hasNextPage,
+  }),
+  merge: (state, page) => {
+    if (state.request.status !== 'loading' && state.request.status !== 'refreshing')
+      throw new Error('Cannot merge a page without an active tracker request.');
+
+    Object.assign(state, receiveNormalizedTaskPage(state, { requestId: state.request.requestId, page }));
+  },
+});
+
 export function trackerApiReducer({ state, action }: Readonly<{
   state: TrackerApiState;
   action: { readonly type: string };
 }>): TrackerApiState {
-  return trackerApi.reducer(tasks(state, action), action);
+  return taskPagination.reducer(trackerApi.reducer(tasks(state, action), action), action);
 }

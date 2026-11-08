@@ -1,7 +1,9 @@
-import { createEntityTable } from '@repo/gql-api';
-import type {
-  RequestApiOptions,
-  RequestApiState
+import { createEntityTable, variablesKey } from '@repo/gql-api';
+import {
+  validateCursorPage,
+  type RequestApiOptions,
+  type RequestApiState,
+  type CursorPaginationState
 } from '@repo/redux-toolkit';
 import {
   createInitialState,
@@ -24,6 +26,7 @@ import {
 export type TrackerApiState = TrackerViewState & {
   readonly api: RequestApiState;
   readonly detail: TaskDetailState;
+  readonly pagination: CursorPaginationState<string>;
 };
 
 type TaskVariables = {
@@ -60,6 +63,13 @@ export function createTrackerApiState(initial: TrackerState = createInitialState
   return {
     ...initial,
     api: { requests: {}, latest: {} },
+    pagination: {
+      identity: variablesKey({ query: initial.result.query, sourceMode: 'graphql' }),
+      cursor: initial.result.pageInfo.endCursor,
+      exhausted: initial.request.status === 'complete',
+      pending: null,
+      error: null,
+    },
     sourceMode: 'graphql',
     peopleRequest: { status: 'idle' },
     creations: {},
@@ -69,6 +79,12 @@ export function createTrackerApiState(initial: TrackerState = createInitialState
 }
 
 function normalizePage({ page, loadedPages }: TrackerRead, variables: TaskVariables): NormalizedTaskPage {
+  validateCursorPage({
+    after: variables.after,
+    endCursor: page.pageInfo.endCursor,
+    hasNextPage: page.pageInfo.hasNextPage,
+  });
+
   // The decoder supplies projectId/assigneeId foreign keys; no response tree is cached.
   return {
     entities: {

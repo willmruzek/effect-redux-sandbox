@@ -15,6 +15,7 @@ import {
   type TrackerSourceMode,
   type FieldWrite
 } from '@repo/project-tracker';
+import { variablesKey } from '@repo/gql-api';
 import {
   fetchTaskDelete,
   fetchTaskCreate,
@@ -37,6 +38,7 @@ import { EffectStore } from './effectStore';
 import { trackerActions } from './reducer';
 import { trackerApi } from './api';
 import { trackerOperations } from './trackerOperations';
+import { taskPagination } from './trackerApiReducers';
 
 function updateTask(
   sourceMode: TrackerSourceMode,
@@ -63,57 +65,34 @@ function updateTask(
 export const loadMoreTasks = Effect.fn('loadMoreTasks')(function*(options: LoadOptions = {}) {
   const store = yield* EffectStore;
   const state = yield* store.getState;
-  const { request } = state;
-
-  if (!options.query && request.status === 'refresh-error')
-    return yield* refreshTasks(options);
-
-  if (
-    !options.query &&
-    (request.status === 'loading' ||
-      request.status === 'refreshing' ||
-      request.status === 'complete')
-  )
-    return;
-
   const query = { ...requestedQuery(state), ...options.query };
 
   query.search = query.search.trim().toLowerCase();
 
   const sourceMode = options.sourceMode ?? state.sourceMode;
 
-  if (
-    (request.status === 'loading' || request.status === 'refreshing') &&
-    request.sourceMode === sourceMode &&
-    JSON.stringify(query) === JSON.stringify(request.query)
-  )
-    return;
-
-  const after = options.query ? null : request.status === 'error' ? request.after : state.result.pageInfo.endCursor;
   const fetchPage = options.fetchPage;
 
-  yield* trackerApi.operations.tasks.run({
-    variables: {
-      mode: 'page',
-      query,
-      after,
-      fail: options.fail ?? false,
-      sourceMode
-    },
+  yield* taskPagination.next({
     store,
-    ...(fetchPage ? { execute: async (variables) => ({ page: await fetchPage(variables), loadedPages: 1 }) }
-      : sourceMode === 'rest' ? {
-        execute: async (variables, signal) => ({
-          page: await fetchRestTrackerPage({
-            endpoint: '/api',
-            after: variables.after,
-            query: variables.query,
-            fail: variables.fail,
-            signal,
+    identity: variablesKey({ query, sourceMode }),
+    restart: Boolean(options.query),
+    query: (after, request) => trackerApi.operations.tasks.runWithResult({
+      variables: { mode: request.mode === 'refresh' ? 'refresh' : 'page', query, after, fail: options.fail ?? false, sourceMode },
+      store,
+      ...(fetchPage ? { execute: async (variables) => ({
+        page: await fetchPage(request.mode === 'refresh'
+          ? { after: variables.after, query: variables.query, fail: variables.fail }
+          : variables),
+        loadedPages: 1,
+      }) }
+        : sourceMode === 'rest' ? {
+          execute: async (variables, signal) => ({
+            page: await fetchRestTrackerPage({ endpoint: '/api', after: variables.after, query: variables.query, fail: variables.fail, signal }),
+            loadedPages: 1,
           }),
-          loadedPages: 1,
-        }),
-      } : {}),
+        } : {}),
+    }),
   });
 });
 
@@ -125,36 +104,24 @@ export const refreshTasks = Effect.fn('refreshTasks')(function*(options: Refresh
   const fetchPage = options.fetchPage;
   const sourceMode = options.sourceMode ?? state.sourceMode;
 
-  yield* trackerApi.operations.tasks.run({
-    variables: {
-      mode: 'refresh',
-      query,
-      after: null,
-      fail: options.fail ?? false,
-      sourceMode
-    },
+  yield* taskPagination.refresh({
     store,
-    ...(fetchPage ? {
-      execute: async (variables) => ({
-        page: await fetchPage({
-          after: null,
-          query: variables.query,
-          fail: variables.fail
+    identity: variablesKey({ query, sourceMode }),
+    query: (after) => trackerApi.operations.tasks.runWithResult({
+      variables: { mode: 'refresh', query, after, fail: options.fail ?? false, sourceMode },
+      store,
+      ...(fetchPage ? {
+        execute: async (variables) => ({
+          page: await fetchPage({ after: variables.after, query: variables.query, fail: variables.fail }),
+          loadedPages: 1,
         }),
-        loadedPages: 1,
-      }),
-    } : sourceMode === 'rest' ? {
-      execute: async (variables, signal) => ({
-        page: await fetchRestTrackerPage({
-          endpoint: '/api',
-          after: null,
-          query: variables.query,
-          fail: variables.fail,
-          signal,
+      } : sourceMode === 'rest' ? {
+        execute: async (variables, signal) => ({
+          page: await fetchRestTrackerPage({ endpoint: '/api', after: variables.after, query: variables.query, fail: variables.fail, signal }),
+          loadedPages: 1,
         }),
-        loadedPages: 1,
-      }),
-    } : {}),
+      } : {}),
+    }),
   });
 });
 

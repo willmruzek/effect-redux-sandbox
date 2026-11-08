@@ -47,6 +47,11 @@ export type RequestOutcome =
     readonly error: string
   };
 
+export type RequestResult<Normalized> =
+  | { readonly status: 'succeeded'; readonly result: Normalized }
+  | { readonly status: 'skipped' | 'superseded' }
+  | { readonly status: 'failed'; readonly error: string };
+
 type Request<Variables> = {
   readonly key: string;
   readonly scope: string;
@@ -105,6 +110,14 @@ type Operation<State, Name extends string, Key extends string, Variables extends
     readonly fetcher?: Fetcher;
     readonly execute?: (variables: Variables, signal: AbortSignal) => Promise<Data>;
   }) => Effect.Effect<RequestOutcome, Error>;
+  readonly runWithResult: (input: {
+    readonly variables: Variables;
+    readonly store: Store<State, OperationActions<Name, Key, Variables, Normalized>>;
+    readonly endpoint?: string;
+    readonly headers?: HeadersInit;
+    readonly fetcher?: Fetcher;
+    readonly execute?: (variables: Variables, signal: AbortSignal) => Promise<Data>;
+  }) => Effect.Effect<RequestResult<Normalized>, Error>;
 };
 
 type OperationBuilder<State, Name extends string> = <
@@ -185,8 +198,8 @@ export function createRequestApi<
       JSON.stringify([options.name, key, variablesKey(variables)]);
     type ReceivingStore = Store<State, OperationActions<Name, Key, Variables, Normalized>>;
     type InFlight = {
-      readonly result: Deferred.Deferred<RequestOutcome, Error>;
-      readonly worker: Deferred.Deferred<Fiber.Fiber<RequestOutcome, Error>>;
+      readonly result: Deferred.Deferred<RequestResult<Normalized>, Error>;
+      readonly worker: Deferred.Deferred<Fiber.Fiber<RequestResult<Normalized>, Error>>;
       waiters: number;
     };
     const inFlight = new WeakMap<ReceivingStore, Map<string, InFlight>>();
@@ -194,8 +207,8 @@ export function createRequestApi<
     function share(
       store: ReceivingStore,
       requestKey: string,
-      execution: Effect.Effect<RequestOutcome, Error>,
-    ): Effect.Effect<RequestOutcome, Error> {
+      execution: Effect.Effect<RequestResult<Normalized>, Error>,
+    ): Effect.Effect<RequestResult<Normalized>, Error> {
       return Effect.uninterruptibleMask((restore) => Effect.gen(function*() {
         let requests = inFlight.get(store);
 
@@ -215,8 +228,8 @@ export function createRequestApi<
         if (!entry) {
           const activeRequests = requests;
           const created: InFlight = {
-            result: yield* Deferred.make<RequestOutcome, Error>(),
-            worker: yield* Deferred.make<Fiber.Fiber<RequestOutcome, Error>>(),
+            result: yield* Deferred.make<RequestResult<Normalized>, Error>(),
+            worker: yield* Deferred.make<Fiber.Fiber<RequestResult<Normalized>, Error>>(),
             waiters: 1,
           };
           requests.set(requestKey, created);
@@ -283,7 +296,7 @@ export function createRequestApi<
     metadata.set(failed.type, caseHandler(failed, (state, { payload }) => failureMetadata('failed', state, payload)));
     metadata.set(cancelled.type, caseHandler(cancelled, (state, { payload }) => failureMetadata('cancelled', state, payload)));
 
-    return {
+    const resultOperation: Omit<Operation<State, Name, Key, Variables, Data, Normalized>, 'run'> = {
       kind,
       key: operationKey,
       selectRequest: (state, variables) => getApiState(state).requests[operationKey(variables)],
@@ -320,9 +333,9 @@ export function createRequestApi<
         };
       },
 
-      run: Effect.fnUntraced(function*(
+      runWithResult: Effect.fnUntraced(function*(
         input: Parameters<Operation<State, Name, Key, Variables, Data, Normalized>['run']>[0],
-      ): Effect.fn.Return<RequestOutcome, Error> {
+      ): Effect.fn.Return<RequestResult<Normalized>, Error> {
         const requestKey = operationKey(input.variables);
         const scope = JSON.stringify([options.name, key, operation.scope?.(input.variables) ?? requestKey]);
         const request: Request<Variables> = {
@@ -339,7 +352,7 @@ export function createRequestApi<
             : yield* Effect.fail(new Error(`Pending ${key} request has no local execution.`));
         }
 
-        const perform = Effect.fnUntraced(function*(): Effect.fn.Return<RequestOutcome, Error> {
+        const perform = Effect.fnUntraced(function*(): Effect.fn.Return<RequestResult<Normalized>, Error> {
           yield* input.store.dispatch(started(request));
 
           if (!owns(getApiState(yield* input.store.getState), request)) {
@@ -381,7 +394,7 @@ export function createRequestApi<
 
             const active = getApiState(yield* input.store.getState).latest[scope]?.requestId === request.requestId;
 
-            return { status: active ? 'succeeded' : 'superseded' };
+            return active ? { status: 'succeeded', result: result.success } : { status: 'superseded' };
           }
 
           yield* input.store.dispatch(failed({ ...request, error: result.failure.message }));
@@ -398,6 +411,15 @@ export function createRequestApi<
       }, (execution, input) => kind === 'query'
         ? Effect.suspend(() => share(input.store, operationKey(input.variables), execution))
         : execution),
+    };
+
+    return {
+      ...resultOperation,
+      run: (input) => resultOperation.runWithResult(input).pipe(
+        Effect.map((outcome): RequestOutcome => outcome.status === 'succeeded'
+          ? { status: 'succeeded' }
+          : outcome),
+      ),
     };
   }
 

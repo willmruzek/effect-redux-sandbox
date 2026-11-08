@@ -2,7 +2,8 @@ import {
   createSlice,
   type PayloadAction,
   type SliceActions,
-  type RequestActions
+  type RequestActions,
+  type PaginationAction
 } from '@repo/effect-store-toolkit';
 import {
   isLocalAction,
@@ -11,7 +12,8 @@ import {
   type TaskDetailReceived,
   type TaskDetailLoadFailed,
   type TaskStatus,
-  type TrackerSourceMode
+  type TrackerSourceMode,
+  type NormalizedTaskPage
 } from '@repo/project-tracker';
 
 import {
@@ -144,6 +146,7 @@ export type RootState = TrackerApiState;
 
 export type StoreAction =
   | LocalAction
+  | PaginationAction<string, NormalizedTaskPage>
   | SliceActions<typeof trackerActions>
   | RequestActions<typeof trackerApi.operations>
   | RequestActions<typeof trackerOperations>;
