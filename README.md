@@ -12,6 +12,8 @@ A pnpm workspace containing two barebone TanStack Start applications and shared 
 - `packages/effect-store-toolkit/` — Immer slices and independent request engine
 - `packages/redux-toolkit/` — Redux Toolkit-backed slices and request engine
 - `packages/gql-api/` — HTTP transport, canonical keys and entity utilities
+- `packages/project-tracker/` — domain validation, shared UI and DB projections
+- `packages/tracker-graphql/` — demo repository and GraphQL/REST transports
 - `tools/eslint-config/` — shared ESLint configuration
 - `tools/tsconfig/` — shared TypeScript configuration
 
@@ -64,6 +66,31 @@ cancel. Completed outcomes are not cached. Duplicate pending mutations skip.
 Standalone request lifecycles remain separate: apps explicitly register their
 guarded started/confirmed/failed cases. Optional optimistic field helpers update
 or restore the owned field; domain validation and workflows remain app-owned.
+
+## Shared tracker domain and transports
+
+`@repo/project-tracker` supplies Fieldwork's shared domain types, pure validation,
+normalized merge policy and React UI. Stores remain authoritative: TanStack DB
+is a read-only relational projection, with no collection mutation handlers or
+optimistic overlays.
+
+One store publication reconciles tagged entity rows in a single sync transaction.
+Derived collections expose projects, people and tasks; live joins retain tasks
+without assignees. Incoming pages preserve pending optimistic fields. Consumers
+own projection subscriptions and cleanup.
+
+`@repo/tracker-graphql` supplies GraphQL and REST clients, runtime decoding and
+handler factories over a deterministic in-memory repository. Consumers create
+and own that repository; there is no shared module-level mutable backend.
+Both transports use the same validation and cursor pagination rules.
+
+The demo repository retains committed changes until reset or server restart.
+It has no authentication or user isolation and is not a production backend.
+Cancellation does not guarantee that a server mutation stopped. Delayed mutations
+started before a reset are rejected.
+
+TanStack React DB is pinned to `1.0.0-rc.1.4`; validate adapter and query changes
+against that installed version when upgrading.
 
 ## Effect source reference
 

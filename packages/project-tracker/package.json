@@ -1,0 +1,32 @@
+{
+  "name": "@repo/project-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./react": { "types": "./dist/ProjectTracker.d.ts", "import": "./dist/ProjectTracker.js" },
+    "./database": { "types": "./dist/database.d.ts", "import": "./dist/database.js" },
+    "./styles.css": "./src/styles.css"
+  },
+  "files": ["dist", "src/styles.css"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@tanstack/react-db": "1.0.0-rc.1.4"
+  },
+  "peerDependencies": { "react": "^19.3.1" },
+  "devDependencies": {
+    "@repo/tsconfig": "workspace:*",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "happy-dom": "^21.0.4",
+    "react-dom": "^19.3.1",
+    "typescript": "^5.0.0",
+    "vitest": "^5.1.0"
+  }
+}
