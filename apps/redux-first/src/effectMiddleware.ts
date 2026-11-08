@@ -1,29 +1,58 @@
-import type { Middleware } from '@reduxjs/toolkit';
-import { Effect } from 'effect';
+import type {
+  Dispatch,
+  Middleware,
+  UnknownAction
+} from '@reduxjs/toolkit';
+import {
+  Effect,
+  type ManagedRuntime
+} from 'effect';
 
-export type DispatchableEffect<A = unknown, E = unknown> = Effect.Effect<
-  A,
-  E,
-  never
->;
+import type { RootState } from './reducer';
+import {
+  ReduxStore,
+  type DispatchableEffect,
+  type EffectDispatch,
+  type StoreEffectDispatch
+} from './reduxStore';
 
-export type EffectDispatch = <A, E>(
-  effect: DispatchableEffect<A, E>,
-) => Promise<A>;
-
-function isDispatchableEffect(value: unknown): value is DispatchableEffect {
+function isDispatchableEffect<R>(value: unknown): value is DispatchableEffect<unknown, unknown, R> {
   return Effect.isEffect(value);
 }
 
-export function createEffectMiddleware<State extends object>(): Middleware<
-  EffectDispatch,
-  State
-> {
-  return () => (next) => (action) => {
-    if (isDispatchableEffect(action)) {
-      return Effect.runPromise(action);
+/**
+ * Only external dispatch enters the application runtime. Service dispatch stays
+ * lazy and preserves the caller's dependencies, scopes and interruption.
+ */
+export function createEffectMiddleware<R, ER>({
+  runtime,
+  getDispatch,
+}: Readonly<{
+  runtime: ManagedRuntime.ManagedRuntime<R, ER>;
+  getDispatch: () => Dispatch<UnknownAction>;
+}>): Middleware<EffectDispatch<R>, RootState> {
+  return (api) => {
+    function dispatch<Action extends UnknownAction>(action: Action): Effect.Effect<Action>;
+
+    function dispatch<A, E, Requirements>(
+      program: Effect.Effect<A, E, Requirements>,
+    ): Effect.Effect<A, E, Exclude<Requirements, ReduxStore>>;
+
+    function dispatch<A, E, Requirements>(
+      input: UnknownAction | Effect.Effect<A, E, Requirements>,
+    ): Effect.Effect<UnknownAction | A, E, Exclude<Requirements, ReduxStore>> {
+      return Effect.isEffect(input)
+        ? Effect.provideService(input, ReduxStore, service)
+        : Effect.sync(() => getDispatch()(input));
     }
 
-    return next(action);
+    const service: ReduxStore['Service'] = {
+      getState: Effect.sync(api.getState),
+      dispatch: dispatch satisfies StoreEffectDispatch,
+    };
+
+    return (next) => (action) => isDispatchableEffect<R>(action)
+      ? runtime.runPromise(Effect.provideService(action, ReduxStore, service))
+      : next(action);
   };
 }

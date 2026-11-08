@@ -6,7 +6,15 @@ import {
 } from '@tanstack/react-router';
 import type { ReactNode } from 'react';
 
+import '@repo/project-tracker/styles.css';
+
+import { loadTracker } from '../loadTracker';
+import { EffectClientApp } from '../components/EffectClientApp';
+
 export const Route = createRootRoute({
+  loader: loadTracker,
+  staleTime: Infinity,
+
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
@@ -14,13 +22,18 @@ export const Route = createRootRoute({
       { title: 'Effect First' },
     ],
   }),
+
   component: RootComponent,
 });
 
 function RootComponent() {
+  const initial = Route.useLoaderData();
+
   return (
     <RootDocument>
-      <Outlet />
+      <EffectClientApp initial={initial}>
+        <Outlet />
+      </EffectClientApp>
     </RootDocument>
   );
 }

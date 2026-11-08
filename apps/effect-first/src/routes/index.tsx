@@ -1,14 +1,21 @@
-import { createFileRoute } from '@tanstack/react-router';
+import {
+  createFileRoute,
+  useNavigate
+} from '@tanstack/react-router';
+
+import { EffectHome } from '../components/EffectClientApp';
 
 export const Route = createFileRoute('/')({
   component: Home,
 });
 
 function Home() {
-  return (
-    <main>
-      <h1>Effect First</h1>
-      <p>A barebone TanStack Start app.</p>
-    </main>
-  );
+  const navigate = useNavigate();
+
+  return <EffectHome onOpenTask={(taskId, sourceMode) =>
+    navigate({
+      to: '/tasks/$taskId',
+      params: { taskId },
+      search: { sourceMode }
+    })} />;
 }

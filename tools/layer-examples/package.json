@@ -1,0 +1,25 @@
+{
+  "name": "@repo/layer-examples",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@reduxjs/toolkit": "^2.14.0",
+    "@repo/effect-store": "workspace:*",
+    "@repo/effect-store-toolkit": "workspace:*",
+    "@repo/redux-toolkit": "workspace:*",
+    "effect": "^4.1.2",
+    "redux": "^5.0.1"
+  },
+  "devDependencies": {
+    "@repo/tsconfig": "workspace:*",
+    "@types/node": "^26.6.6",
+    "typescript": "^5.0.0",
+    "vitest": "^5.1.0"
+  }
+}
