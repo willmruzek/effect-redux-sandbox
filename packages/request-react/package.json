@@ -1,0 +1,36 @@
+{
+  "name": "@repo/request-react",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "effect": "^4.1.2"
+  },
+  "peerDependencies": {
+    "react": "^19.3.1"
+  },
+  "devDependencies": {
+    "@reduxjs/toolkit": "^2.14.0",
+    "@repo/effect-store": "workspace:*",
+    "@repo/effect-store-toolkit": "workspace:*",
+    "@repo/redux-toolkit": "workspace:*",
+    "@repo/tsconfig": "workspace:*",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "happy-dom": "^21.0.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^5.0.0",
+    "vitest": "^5.1.0"
+  }
+}

@@ -94,6 +94,7 @@ type Operation<State, Name extends string, Key extends string, Variables extends
     readonly cancelled: ActionCreator<Failure<Variables>, `${Name}/${Key}/cancelled`>;
   };
   readonly key: (variables: Variables) => string;
+  readonly selectRequest: (state: State, variables: Variables) => ApiRequest | undefined;
   readonly reducer: (handlers: OperationReducers<State, Variables, Normalized>) =>
     (state: State, action: { readonly type: string }) => State;
   readonly run: (input: {
@@ -285,6 +286,7 @@ export function createRequestApi<
     return {
       kind,
       key: operationKey,
+      selectRequest: (state, variables) => getApiState(state).requests[operationKey(variables)],
       actions: {
         started,
         succeeded,
