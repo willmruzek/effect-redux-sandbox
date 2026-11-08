@@ -6,6 +6,24 @@ export {
   type TaskValidationState,
 } from './taskValidation.js';
 
+export {
+  createLocalActions,
+  isLocalAction,
+  reduceLocalData,
+  remapTaskPreference,
+  trackerTables,
+  type LocalAction,
+  type LocalResult,
+  type LocalState,
+  type ScratchNote,
+  type TaskPreference,
+} from './localData.js';
+
+import type {
+  ScratchNote,
+  TaskPreference
+} from './localData.js';
+
 export type Project = {
   readonly id: string;
   readonly name: string;
@@ -239,6 +257,8 @@ export type TrackerState = {
   readonly projects: Readonly<Record<string, Project>>;
   readonly people: Readonly<Record<string, Person>>;
   readonly tasks: Readonly<Record<string, Task>>;
+  readonly taskPreferences: Readonly<Record<string, TaskPreference>>;
+  readonly scratchNotes: Readonly<Record<string, ScratchNote>>;
   readonly selectedProjectId: string | null;
   readonly statusFilter: TaskStatus | 'all';
   readonly request: RequestState;
@@ -435,6 +455,8 @@ export function createInitialState(data: TrackerData = {
     projects: indexById(data.projects.map((row) => ({ ...row }))),
     people: indexById(data.people.map((row) => ({ ...row }))),
     tasks: indexById(data.tasks.map((row) => ({ ...row }))),
+    taskPreferences: {},
+    scratchNotes: {},
     selectedProjectId: null,
     statusFilter: 'all',
     request: { status: page && !page.pageInfo.hasNextPage ? 'complete' : 'idle' },

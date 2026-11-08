@@ -5,6 +5,9 @@ import {
   type RequestActions
 } from '@repo/effect-store-toolkit';
 import {
+  isLocalAction,
+  reduceLocalData,
+  type LocalAction,
   type TaskDetailReceived,
   type TaskDetailLoadFailed,
   type TaskStatus,
@@ -94,8 +97,10 @@ const tracker = createSlice({
       if (!creation || creation.status === 'saving')
         return;
 
-      if (creation.status === 'error')
+      if (creation.status === 'error') {
         delete state.tasks[creation.taskId];
+        delete state.taskPreferences[creation.taskId];
+      }
 
       delete state.creations[payload];
     }),
@@ -128,7 +133,9 @@ export function rootReducer(input: Readonly<{
   const readState = trackerApiReducer(input);
   const operationState = trackerOperationReducer({ state: readState, action: input.action });
 
-  return tracker.reducer({ state: operationState, action: input.action });
+  const next = tracker.reducer({ state: operationState, action: input.action });
+
+  return isLocalAction(input.action) ? reduceLocalData(next, input.action) : next;
 }
 
 export const trackerActions = { ...tracker.actions, ...operationActions };
@@ -136,6 +143,7 @@ export const trackerActions = { ...tracker.actions, ...operationActions };
 export type RootState = TrackerApiState;
 
 export type StoreAction =
+  | LocalAction
   | SliceActions<typeof trackerActions>
   | RequestActions<typeof trackerApi.operations>
   | RequestActions<typeof trackerOperations>;

@@ -294,6 +294,20 @@ plans added shared query execution and generated API reducers, and the examples
 now use those contracts. Neither change adds a shared cross-store engine,
 compatibility shim, automatically installed reducer or response cache.
 
+## Local frontend data
+
+The tracker now demonstrates [plan 0008](../plans/0008-local-data-ownership.md)
+in both stores: task stars live in local companion records and scratch notes live
+in a local-only table. App-owned table declarations describe ownership; explicit,
+validated synchronous actions change local data without transport. The UI reads
+both tables through the same read-only projection, including an optional
+task-preference left join.
+
+Confirmed deletion removes preferences; draft confirmation remaps them while an
+existing server-ID preference wins. Remote failures leave independent local
+changes intact. These tables start empty for SSR/hydration and are in-memory
+only; offline synchronization and durable storage are separate roadmap items.
+
 For official Redux slice registration and dispatch inference background, see
 [Redux Toolkit TypeScript usage](https://redux-toolkit.js.org/usage/usage-with-typescript)
 and [createSlice](https://redux-toolkit.js.org/api/createSlice).

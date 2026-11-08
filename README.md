@@ -13,17 +13,17 @@ Plans:
 - [Prove the layers](plans/0005-prove-the-layers.md) — IMPLEMENTED
 - [Share in-flight reads](plans/0006-share-in-flight-reads.md) — IMPLEMENTED
 - [Generate API reducers](plans/0007-generated-api-reducers.md) — IMPLEMENTED
-- [Local data in the frontend database](plans/0008-local-data-ownership.md) — TO BE IMPLEMENTED
+- [Local data in the frontend database](plans/0008-local-data-ownership.md) — IMPLEMENTED
 
 Plan status describes the work for that stage, not any deferred roadmap included
-in its historical notes. Plan 0008 describes future local-data ownership work;
-it has not changed the current application behavior.
+in its historical notes. Plan 0008 implements in-memory local-data ownership;
+durable persistence and offline synchronization remain future work.
 
 Base CRUD records the retained behavior; the other plans preserve the project's
 origins, completed ergonomics work, optional layers and deferred/removed features.
 Read them in numbered order: foundation, CRUD behavior, optional layer
-foundations, boilerplate reduction, consumer proof, shared reads, then generated
-API reducers. Each stage builds on or explicitly revises the preceding
+foundations, boilerplate reduction, consumer proof, shared reads, generated
+API reducers, then local data. Each stage builds on or explicitly revises the preceding
 contracts; the sequence is a reconstructed design narrative, not an exact
 implementation chronology.
 
@@ -68,8 +68,8 @@ for shared-read semantics and official documentation references.
 
 ## Library roadmap
 
-These are planned additions to both store approaches and their integrations,
-not current capabilities. Each item needs a numbered implementation plan defining ownership,
+Unchecked items are planned additions, not current capabilities. Each needs a
+numbered implementation plan defining ownership,
 public APIs, failure/cancellation behavior and test-first acceptance before work
 begins. Keep normalized entities store-owned and domain merge rules app-owned;
 this roadmap does not require an endpoint response cache.
@@ -87,13 +87,13 @@ this roadmap does not require an endpoint response cache.
 - [ ] **Request-status hooks:** expose query and mutation status and errors to
   React components without requiring knowledge of store metadata layout;
   observe existing requests without starting workflows.
-- [ ] **Local-only entity tables:** declare local ownership and support validated
+- [x] **Local-only entity tables:** declare local ownership and support validated
   synchronous writes without transport or request lifecycles.
-- [ ] **Local companion tables:** attach local attributes to remote entities by
+- [x] **Local companion tables:** attach local attributes to remote entities by
   ID without sending them to the server or overwriting them during remote merges.
-- [ ] **Reactive local-data projections:** include local tables in TanStack DB
+- [x] **Reactive local-data projections:** include local tables in TanStack DB
   projections and optional joins, updating the UI without fetching.
-- [ ] **Local-data lifecycle policies:** define deletion, temporary-ID,
+- [x] **Local-data lifecycle policies:** define deletion, temporary-ID,
   retention and SSR hydration behavior; remote rollback must preserve independent
   local changes.
 - [ ] **Durable local storage:** persist and restore selected normalized data,
@@ -113,7 +113,7 @@ this roadmap does not require an endpoint response cache.
 
 The local-data items are covered by
 [plan 0008: Local data in the frontend database](plans/0008-local-data-ownership.md),
-currently **TO BE IMPLEMENTED**. Offline-first capabilities require separate
+now **IMPLEMENTED**. Offline-first capabilities require separate
 plans; they are not included in plan 0008 or implemented today.
 
 The checklist is not an execution order. Dependencies and behavior choices will
@@ -596,12 +596,28 @@ the first page. There are no revision-conflict receipts or deletion tombstones.
 ## Store-owned data and read-only TanStack DB
 
 Stores own normalized projects, people and tasks, visible result IDs/query/cursor
-metadata, UI selections, and pending/error writes. TanStack DB is only a relational
-projection: no mutation handlers or optimistic overlays.
+metadata, UI selections, pending/error writes, local task preferences and
+scratch notes. TanStack DB is only a relational projection: no mutation handlers
+or optimistic overlays.
+
+The shared tracker declares table ownership outside state. Its synchronous local
+action boundary validates task stars and trimmed scratch-note additions/deletions,
+returns explicit results to the UI and never starts transport. The ledger left
+joins preferences to tasks; absent preferences mean unstarred. Explicit false
+preferences are retained. The app builds remote payloads from server-owned
+fields rather than serializing local tables.
+
+Confirmed deletion removes the task preference; a pending or failed deletion
+does not. A draft preference follows its confirmed ID unless that ID already has
+one, in which case the existing preference wins. Discarding a failed draft also
+removes its preference. Local tables start empty in SSR/hydration, remain
+store-instance-local, and are lost on reload: there is no persistence or offline
+sync in this stage. Remote rollback does not roll back independent local writes.
 
 The shared projection reconciles a snapshot into one tagged entity collection
 with a single sync transaction, skipping unchanged row references. Indexed
-derived collections expose tasks/projects/people. One source publication keeps
+derived collections expose tasks/projects/people, task preferences and scratch
+notes. One source publication keeps
 live joins coherent; separate store dispatches remain separate publications.
 Use live queries for cross-collection results, not imperative reads from
 individual collection-change callbacks.

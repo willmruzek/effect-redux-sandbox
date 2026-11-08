@@ -20,6 +20,7 @@ import {
   requestedQuery,
   type DeleteOptions,
   type FieldWrite,
+  type LocalResult,
   type TaskPriority,
   type TaskStatus,
   type TaskQuery,
@@ -48,6 +49,9 @@ type Props = Pick<TaskCreationPanelProps, 'onCreate' | 'onRetry' | 'onDiscard'> 
   readonly onSelectSourceMode: (sourceMode: TrackerSourceMode) => Promise<unknown>;
   readonly onSaveAssignee: (input: FieldWrite<string | null>) => Promise<unknown>;
   readonly onRenamePerson: (input: PersonNameInput) => Promise<unknown>;
+  readonly onSetStarred: (input: Readonly<{ taskId: string; starred: boolean }>) => LocalResult;
+  readonly onAddNote: (text: string) => LocalResult;
+  readonly onDeleteNote: (id: string) => LocalResult;
 };
 
 const statuses: readonly {
@@ -144,6 +148,9 @@ function TrackerWorkspace({
   onRenamePerson,
   onSelectSourceMode,
   onOpenTask,
+  onSetStarred,
+  onAddNote,
+  onDeleteNote,
 }: Props & Readonly<{ database: TrackerDatabase }>) {
   const { sourceMode, peopleRequest, creations, deletions } = state;
   const peopleLoading = peopleRequest.status === 'loading';
@@ -151,6 +158,8 @@ function TrackerWorkspace({
 
   const [failRequest, setFailRequest] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [noteText, setNoteText] = useState('');
   const [failStatus, setFailStatus] = useState(false);
   const [failPriority, setFailPriority] = useState(false);
   const [failDeletion, setFailDeletion] = useState(false);
@@ -192,6 +201,9 @@ function TrackerWorkspace({
   const peopleQuery = useLiveQuery({
     query: (q) => q.from({ person: database.people }).orderBy(({ person }) => person.name, 'asc'),
   });
+  const notesQuery = useLiveQuery({
+    query: (q) => q.from({ note: database.scratchNotes }),
+  });
   const peopleCountQuery = useLiveQuery({
     query: (q) => q.from({ person: database.people }).select(({ person }) => ({ total: count(person.id) })),
   });
@@ -222,11 +234,13 @@ function TrackerWorkspace({
       .from({ task: database.tasks })
       .join({ project: database.projects }, ({ task, project }) => eq(task.projectId, project.id), 'inner')
       .join({ person: database.people }, ({ task, person }) => eq(task.assigneeId, person.id), 'left')
+      .join({ preference: database.taskPreferences }, ({ task, preference }) => eq(task.id, preference.taskId), 'left')
       .fn.where(({ task }) => order.has(task.id) && deletions[task.id]?.status !== 'saving')
       .fn.select(({
         task,
         project,
-        person
+        person,
+        preference
       }) => ({
         rank: order.get(task.id) ?? 0,
         id: task.id,
@@ -238,6 +252,7 @@ function TrackerWorkspace({
         assigneeId: task.assigneeId,
         assigneeName: person?.name,
         initials: person?.initials,
+        starred: preference?.starred ?? false,
       })),
   });
 
@@ -278,7 +293,7 @@ function TrackerWorkspace({
   const project = projects.find((project) => project.id === selectedProjectId);
   const queryError = [
     projectsQuery, peopleQuery, peopleCountQuery, taskCountsQuery, projectSummariesQuery,
-    matchingQuery, tasksQuery,
+    matchingQuery, tasksQuery, notesQuery,
   ].some((query) => query.status === 'error');
 
   function run(action: () => void | Promise<unknown>): void {
@@ -286,6 +301,12 @@ function TrackerWorkspace({
     void Promise.resolve().then(action).catch((error: unknown) => {
       setActionError(error instanceof Error ? error.message : String(error));
     });
+  }
+
+  function runLocal(result: LocalResult): boolean {
+    setLocalError(result.status === 'error' ? result.error : null);
+
+    return result.status === 'success';
   }
 
   return (
@@ -422,7 +443,12 @@ function TrackerWorkspace({
                 <tbody>
                   {tasks.map((task) => (
                     <tr key={task.id}>
-                      <td><div className="task-identity"><div><button type="button" className="task-title task-title-link"
+                      <td><div className="task-identity"><button type="button" className="local-star"
+                        aria-label={`${task.starred ? 'Unstar' : 'Star'} task ${task.id}`}
+                        aria-pressed={task.starred}
+                        onClick={() => runLocal(onSetStarred({ taskId: task.id, starred: !task.starred }))}>
+                        {task.starred ? '★' : '☆'}
+                      </button><div><button type="button" className="task-title task-title-link"
                         aria-label={`Open task ${task.id}: ${task.title}`} onClick={() => onOpenTask(task.id, sourceMode)}>{task.title}</button>
                         <small><span className="task-id">{task.id}</span>{task.projectName}</small></div></div></td>
                       <td>
@@ -525,7 +551,28 @@ function TrackerWorkspace({
             </div>
           </section> : null}
           <TaskCreationPanel projects={projects} people={peopleQuery.data} tasks={state.tasks}
-            creations={creations} onCreate={onCreate} onRetry={onRetry} onDiscard={onDiscard} />
+            creations={creations} preferences={state.taskPreferences} onCreate={onCreate} onRetry={onRetry}
+            onDiscard={onDiscard} onSetStarred={(input) => { runLocal(onSetStarred(input)); }} />
+          <section className="scratch-notes" aria-labelledby="scratch-heading">
+            <p className="eyebrow">YOUR NOTEBOOK / LOCAL TO THIS SESSION</p>
+            <h2 id="scratch-heading">Scratch notes.</h2>
+            <p>These notes and task stars stay in this browser session and are cleared on reload.</p>
+            <form aria-label="Add scratch note" onSubmit={(event) => {
+              event.preventDefault();
+
+              if (runLocal(onAddNote(noteText)))
+                setNoteText('');
+            }}>
+              <label>New note<input value={noteText} onChange={(event) => setNoteText(event.target.value)} /></label>
+              <button type="submit">Add note</button>
+            </form>
+            <ul>{notesQuery.data.map((note) => <li key={note.id}>
+              <span>{note.text}</span>
+              <button type="button" aria-label={`Delete note ${note.text}`}
+                onClick={() => runLocal(onDeleteNote(note.id))}>Delete</button>
+            </li>)}</ul>
+          </section>
+          {localError ? <p role="alert" className="error-message">{localError}</p> : null}
           <section className="load-panel" aria-labelledby="load-heading">
             <div className="load-copy"><span className="eyebrow">A LITTLE MORE TO EXPLORE</span><h2 id="load-heading">Bring more records into the notebook.</h2><p>The selected source fetches up to 20 matches after the last cursor.<br />Refresh reloads the first backend page; later pages can be loaded again. The current view stays while refresh is in progress.</p></div>
             <div className="load-controls">

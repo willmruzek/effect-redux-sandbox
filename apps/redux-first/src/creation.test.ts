@@ -12,12 +12,15 @@ import {
 
 import {
   createGraphqlHandler,
+  createRestHandler,
   createTrackerRepository
 } from '@repo/tracker-graphql/server';
+import { createLocalActions } from '@repo/project-tracker';
 
 import {
   createAppStore,
-  createTask
+  createTask,
+  trackerActions
 } from './store';
 
 const runtimes: ManagedRuntime.ManagedRuntime<never, never>[] = [];
@@ -60,6 +63,93 @@ afterEach(async () => {
 });
 
 describe('task creation', () => {
+  test('removes a draft preference when the failed draft is discarded', async () => {
+    // Arrange: keep a failed draft with a local preference.
+    vi.useFakeTimers();
+    const { app, input } = arrange();
+    const pending = app.dispatch(createTask({ kind: 'new', input, fail: true }));
+    const operationId = Object.keys(app.getState().creations)[0];
+
+    if (!operationId)
+      throw new Error('Missing local creation.');
+
+    const taskId = `temp:${operationId}`;
+    const local = createLocalActions({ getState: app.getState, dispatch: app.dispatch, createId: () => 'note' });
+
+    expect(local.setStarred({ taskId, starred: true })).toEqual({ status: 'success' });
+    await vi.advanceTimersByTimeAsync(700);
+    await pending;
+
+    // Act: discard the failed draft.
+    app.dispatch(trackerActions.creationDiscarded(operationId));
+
+    // Assert: the draft and its preference are gone.
+    expect(app.getState().tasks[taskId]).toBeUndefined();
+    expect(app.getState().taskPreferences[taskId]).toBeUndefined();
+  });
+
+  test.each(['graphql', 'rest'])('omits local fields from serialized %s creation input', async (mode) => {
+    // Arrange: a structurally compatible input carries an extra local property.
+    vi.useFakeTimers();
+    const { app, input, fetcher, repository, transport } = arrange();
+    const augmented = { ...input, localOnlyMarker: 'must-not-send' };
+    const rest = createRestHandler({ repository });
+
+    fetcher.mockImplementation((url, init) => url.startsWith('/api')
+      ? rest(new Request(new URL(url, 'http://localhost'), init))
+      : transport(url, init));
+
+    if (mode === 'rest')
+      app.dispatch(trackerActions.sourceModeSelected('rest'));
+
+    // Act: submit it through the real workflow.
+    const pending = app.dispatch(createTask({ kind: 'new', input: augmented }));
+    await vi.advanceTimersByTimeAsync(700);
+    await pending;
+
+    // Assert: the actual transport payload is explicitly constructed.
+    const request = fetcher.mock.calls.find(([url, init]) => mode === 'rest'
+      ? url === '/api/tasks' && init.method === 'POST'
+      : typeof init.body === 'string' && init.body.includes('CreateTask'));
+
+    expect(request).toBeDefined();
+    expect(request?.[1].body).not.toContain('localOnlyMarker');
+    expect(request?.[1].body).not.toContain('must-not-send');
+  });
+
+  test('preserves a draft star when creation is confirmed', async () => {
+    // Arrange: the server has not yet confirmed the draft.
+    vi.useFakeTimers();
+    const { app, input } = arrange();
+    const pending = app.dispatch(createTask({ kind: 'new', input }));
+    const operationId = Object.keys(app.getState().creations)[0];
+
+    if (!operationId)
+      throw new Error('Missing local creation.');
+
+    const temporaryId = `temp:${operationId}`;
+    const local = createLocalActions({
+      getState: app.getState,
+      dispatch: app.dispatch,
+      createId: () => 'note',
+    });
+
+    expect(local.setStarred({ taskId: temporaryId, starred: true })).toEqual({ status: 'success' });
+
+    // Act: confirm creation.
+    await vi.advanceTimersByTimeAsync(700);
+    await pending;
+
+    // Assert: the local preference follows the server ID.
+    const creation = app.getState().creations[operationId];
+
+    if (!creation || creation.status !== 'created')
+      throw new Error('Creation was not confirmed.');
+
+    expect(app.getState().taskPreferences[temporaryId]).toBeUndefined();
+    expect(app.getState().taskPreferences[creation.taskId]).toEqual({ taskId: creation.taskId, starred: true });
+  });
+
   test('replaces its temporary entity with the server-created task', async () => {
     // Arrange: the creation is submitted to the real GraphQL repository.
     vi.useFakeTimers();

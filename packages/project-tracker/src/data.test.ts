@@ -15,6 +15,8 @@ function state(): TrackerState {
   return {
     projects: {},
     people: {},
+    taskPreferences: {},
+    scratchNotes: {},
     tasks: {
       t: {
         id: 't',

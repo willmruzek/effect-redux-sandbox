@@ -11,6 +11,8 @@ import type {
   Person,
   Project,
   Task,
+  TaskPreference,
+  ScratchNote,
   TrackerSource,
   TrackerState
 } from './index.js';
@@ -27,11 +29,20 @@ type Entity =
   | {
     readonly kind: 'task';
     readonly value: Task
+  }
+  | {
+    readonly kind: 'taskPreference';
+    readonly value: TaskPreference
+  }
+  | {
+    readonly kind: 'scratchNote';
+    readonly value: ScratchNote
   };
 
 function entitiesFromStore(source: TrackerSource): Collection<Entity, string> {
   return createCollection({
-    getKey: (entity: Entity): string => `${entity.kind}:${entity.value.id}`,
+    getKey: (entity: Entity): string =>
+      `${entity.kind}:${entity.kind === 'taskPreference' ? entity.value.taskId : entity.value.id}`,
 
     startSync: true,
     gcTime: Infinity,
@@ -46,7 +57,7 @@ function entitiesFromStore(source: TrackerSource): Collection<Entity, string> {
       }) => {
         let previous: TrackerState | undefined;
 
-        function reconcileRows<Row extends { readonly id: string }>(
+        function reconcileRows<Row>(
           current: Readonly<Record<string, Row>>,
           before: Readonly<Record<string, Row>>,
           entity: (row: Row) => Entity,
@@ -71,7 +82,9 @@ function entitiesFromStore(source: TrackerSource): Collection<Entity, string> {
           if (
             current.projects === previous?.projects &&
             current.people === previous.people &&
-            current.tasks === previous.tasks
+            current.tasks === previous.tasks &&
+            current.taskPreferences === previous.taskPreferences &&
+            current.scratchNotes === previous.scratchNotes
           )
             return;
 
@@ -80,6 +93,8 @@ function entitiesFromStore(source: TrackerSource): Collection<Entity, string> {
           reconcileRows(current.projects, previous?.projects ?? {}, (value) => ({ kind: 'project', value }));
           reconcileRows(current.people, previous?.people ?? {}, (value) => ({ kind: 'person', value }));
           reconcileRows(current.tasks, previous?.tasks ?? {}, (value) => ({ kind: 'task', value }));
+          reconcileRows(current.taskPreferences, previous?.taskPreferences ?? {}, (value) => ({ kind: 'taskPreference', value }));
+          reconcileRows(current.scratchNotes, previous?.scratchNotes ?? {}, (value) => ({ kind: 'scratchNote', value }));
           previous = current;
           commit();
         };
@@ -98,6 +113,8 @@ export type TrackerDatabase = {
   readonly projects: Collection<WithVirtualProps<Project>, string | number>;
   readonly people: Collection<WithVirtualProps<Person>, string | number>;
   readonly tasks: Collection<WithVirtualProps<Task>, string | number>;
+  readonly taskPreferences: Collection<WithVirtualProps<TaskPreference>, string | number>;
+  readonly scratchNotes: Collection<WithVirtualProps<ScratchNote>, string | number>;
   readonly dispose: () => Promise<void>;
 };
 
@@ -152,9 +169,38 @@ export function createTrackerDatabase(source: TrackerSource): TrackerDatabase {
         return entity.value;
       }),
   });
+  const taskPreferences = createLiveQueryCollection({
+    id: 'tracker-task-preferences',
+    startSync: true,
+    gcTime: Infinity,
+    getKey: (preference) => preference.taskId,
+    query: (q) => q.from({ entity: entities })
+      .where(({ entity }) => eq(entity.kind, 'taskPreference'))
+      .fn.select(({ entity }): TaskPreference => {
+        if (entity.kind !== 'taskPreference')
+          throw new Error('Expected a task preference.');
+
+        return entity.value;
+      }),
+  });
+  const scratchNotes = createLiveQueryCollection({
+    id: 'tracker-scratch-notes',
+    startSync: true,
+    gcTime: Infinity,
+    getKey: (note) => note.id,
+    query: (q) => q.from({ entity: entities })
+      .where(({ entity }) => eq(entity.kind, 'scratchNote'))
+      .fn.select(({ entity }): ScratchNote => {
+        if (entity.kind !== 'scratchNote')
+          throw new Error('Expected a scratch note.');
+
+        return entity.value;
+      }),
+  });
 
   tasks.createIndex((task) => task.projectId, { indexType: BasicIndex, name: 'tasks-project' });
   tasks.createIndex((task) => task.assigneeId, { indexType: BasicIndex, name: 'tasks-assignee' });
+  taskPreferences.createIndex((preference) => preference.taskId, { indexType: BasicIndex, name: 'task-preferences-id' });
   projects.createIndex((project) => project.id, { indexType: BasicIndex, name: 'projects-id' });
   people.createIndex((person) => person.id, { indexType: BasicIndex, name: 'people-id' });
 
@@ -162,6 +208,8 @@ export function createTrackerDatabase(source: TrackerSource): TrackerDatabase {
     projects,
     people,
     tasks,
+    taskPreferences,
+    scratchNotes,
 
     dispose: () => entities.cleanup({ dependents: true }),
   };

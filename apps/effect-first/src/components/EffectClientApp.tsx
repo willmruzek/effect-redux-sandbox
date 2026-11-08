@@ -7,7 +7,10 @@ import {
 
 import { useStoreSnapshot } from '@repo/effect-store-react';
 import { ProjectTracker } from '@repo/project-tracker/react';
-import type { TrackerState } from '@repo/project-tracker';
+import {
+  createLocalActions,
+  type TrackerState
+} from '@repo/project-tracker';
 
 import {
   createAppStore,
@@ -57,6 +60,11 @@ export function EffectHome({ onOpenTask }: Readonly<{ onOpenTask: (taskId: strin
   const store = useEffectAppStore();
 
   const state = useStoreSnapshot(store);
+  const local = createLocalActions({
+    getState: store.getSnapshot,
+    dispatch: store.dispatch,
+    createId: () => crypto.randomUUID(),
+  });
 
   return <ProjectTracker
     implementation="Effect First"
@@ -88,5 +96,8 @@ export function EffectHome({ onOpenTask }: Readonly<{ onOpenTask: (taskId: strin
     onRenamePerson={(input) => store.dispatch(renamePerson(input))}
     onSelectSourceMode={(mode) => store.dispatch(selectSourceMode(mode))}
     onOpenTask={onOpenTask}
+    onSetStarred={local.setStarred}
+    onAddNote={local.addNote}
+    onDeleteNote={local.deleteNote}
   />;
 }

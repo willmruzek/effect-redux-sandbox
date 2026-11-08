@@ -2,7 +2,8 @@ import {
   createOptimisticFieldReducers,
   createSlice
 } from '@repo/effect-store-toolkit';
-import type {
+import {
+  remapTaskPreference,
   TaskFieldInput,
   TaskPriority,
   TaskStatus
@@ -118,6 +119,7 @@ const tracker = createSlice({
 
       onConfirmed: (state, payload) => {
         delete state.tasks[payload.taskId];
+        delete state.taskPreferences[payload.taskId];
         delete state.statusWrites[payload.taskId];
         delete state.priorityWrites[payload.taskId];
         delete state.assigneeWrites[payload.taskId];
@@ -162,6 +164,9 @@ const tracker = createSlice({
 
       onConfirmed: (state, payload, saved, pending) => {
         delete state.tasks[pending.taskId];
+        state.taskPreferences = {
+          ...remapTaskPreference(state.taskPreferences, { from: pending.taskId, to: saved.id }),
+        };
 
         const existing = state.tasks[saved.id];
 

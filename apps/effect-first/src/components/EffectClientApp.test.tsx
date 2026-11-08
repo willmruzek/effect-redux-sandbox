@@ -159,6 +159,8 @@ function fixture(): TrackerState {
     assigneeWrites: {},
     personWrites: {},
     detailWrites: {},
+    taskPreferences: {},
+    scratchNotes: {},
   };
 }
 
@@ -207,6 +209,41 @@ describe('Effect project tracker UI', () => {
     expect(container.textContent).toContain('Atlas website');
     expect(container.textContent).toContain('Mara Chen');
     expect(container.textContent).toContain('Map the new information architecture');
+  });
+
+  test('updates local stars and notes without sending requests', async () => {
+    // Arrange: use the real app and its read-only projection.
+    const star = container.querySelector<HTMLButtonElement>('[aria-label="Star task ATL-01"]');
+    const input = container.querySelector<HTMLInputElement>('.scratch-notes input');
+    const form = container.querySelector<HTMLFormElement>('[aria-label="Add scratch note"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+
+    if (!star || !input || !form || !setter)
+      throw new Error('Missing local controls.');
+
+    const requestsBefore = vi.mocked(fetch).mock.calls.length;
+
+    // Act: commit a local star and note.
+    await act(async () => star.click());
+    await act(async () => {
+      setter.call(input, '  A local note  ');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+
+    // Assert: both projections update without transport.
+    expect(container.querySelector('[aria-label="Unstar task ATL-01"]')?.getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelector('.scratch-notes')?.textContent).toContain('A local note');
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(requestsBefore);
+
+    const removeNote = container.querySelector<HTMLButtonElement>('[aria-label="Delete note A local note"]');
+
+    if (!removeNote)
+      throw new Error('Missing local note delete button.');
+
+    await act(async () => removeNote.click());
+    expect(container.querySelector('.scratch-notes')?.textContent).not.toContain('A local note');
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(requestsBefore);
   });
 
   test('shows seeded unassigned tasks through the shared filter', async () => {
@@ -410,6 +447,8 @@ describe('Effect project tracker UI', () => {
       assigneeWrites: {},
       personWrites: {},
       detailWrites: {},
+      taskPreferences: {},
+      scratchNotes: {},
     };
     const initial = state;
 
@@ -459,6 +498,8 @@ describe('Effect project tracker UI', () => {
     expect(fetcher).not.toHaveBeenCalled();
     expect(container.querySelectorAll('tbody tr')).toHaveLength(1);
     expect(container.querySelector('tbody')?.textContent).toContain('STU-02');
+    expect(container.querySelector('.scratch-notes li')).toBeNull();
+    expect(container.querySelector('[aria-label="Star task STU-02"]')?.getAttribute('aria-pressed')).toBe('false');
   });
 
   test(

@@ -41,6 +41,8 @@ function createSource() {
         priority: 'high'
       }
     },
+    taskPreferences: {},
+    scratchNotes: {},
     selectedProjectId: null,
     statusFilter: 'all',
     request: { status: 'idle' },
@@ -92,6 +94,55 @@ function createSource() {
 }
 
 describe('store-backed TanStack DB collections', () => {
+  test('publishes local notes and optional preferences from the store', async () => {
+    // Arrange: the source initially has no local records.
+    const source = createSource();
+    const database = createTrackerDatabase(source);
+
+    // Act: publish local-only changes.
+    source.update({
+      ...source.getSnapshot(),
+      taskPreferences: { t: { taskId: 't', starred: true } },
+      scratchNotes: { n: { id: 'n', text: 'Remember' } },
+    });
+
+    // Assert: both projected collections reflect the same store publication.
+    try {
+      expect(database.taskPreferences.get('t')?.starred).toBe(true);
+      expect(database.scratchNotes.get('n')?.text).toBe('Remember');
+      expect(database.tasks.get('t')?.title).toBe('Test task');
+    } finally {
+      await database.dispose();
+    }
+  });
+
+  test('keeps tasks without preferences in a reactive left join', async () => {
+    // Arrange: the task exists before its optional local preference.
+    const source = createSource();
+    const database = createTrackerDatabase(source);
+    const joined = createLiveQueryCollection({
+      query: (q) => q.from({ task: database.tasks })
+        .join({ preference: database.taskPreferences }, ({ task, preference }) => eq(task.id, preference.taskId), 'left')
+        .fn.select(({ task, preference }) => ({
+          id: task.id,
+          starred: preference?.starred ?? false,
+        })),
+    });
+
+    try {
+      await joined.preload();
+      expect(Array.from(joined.values())).toMatchObject([{ id: 't', starred: false }]);
+
+      // Act: publish a local preference without fetching.
+      source.update({ ...source.getSnapshot(), taskPreferences: { t: { taskId: 't', starred: true } } });
+
+      // Assert: the joined row changes in place.
+      expect(Array.from(joined.values())).toMatchObject([{ id: 't', starred: true }]);
+    } finally {
+      await database.dispose();
+    }
+  });
+
   test('builds ready views synchronously from only the store snapshot', async () => {
     // Arrange: no separate DB hydration data exists.
     const source = createSource();

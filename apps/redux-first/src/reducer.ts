@@ -5,6 +5,8 @@ import {
 } from '@reduxjs/toolkit';
 
 import {
+  isLocalAction,
+  reduceLocalData,
   type TaskDetailReceived,
   type TaskDetailLoadFailed,
   type TaskStatus,
@@ -80,8 +82,10 @@ const tracker = createSlice({
       if (!creation || creation.status === 'saving')
         return;
 
-      if (creation.status === 'error')
+      if (creation.status === 'error') {
         delete state.tasks[creation.taskId];
+        delete state.taskPreferences[creation.taskId];
+      }
 
       delete state.creations[payload];
     },
@@ -105,7 +109,9 @@ export function rootReducer(state: RootState | undefined, action: UnknownAction)
   const readState = trackerApiReducer(state, action);
   const operationState = trackerOperationReducer(readState, action);
 
-  return tracker.reducer(operationState, action);
+  const next = tracker.reducer(operationState, action);
+
+  return isLocalAction(action) ? reduceLocalData(next, action) : next;
 }
 
 export const trackerActions = { ...tracker.actions, ...operationActions };

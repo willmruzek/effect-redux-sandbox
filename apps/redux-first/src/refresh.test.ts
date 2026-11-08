@@ -10,11 +10,12 @@ import {
   vi
 } from 'vitest';
 
-import type {
-  FetchPage,
-  Task,
-  TaskPage,
-  TrackerState
+import {
+  createLocalActions,
+  type FetchPage,
+  type Task,
+  type TaskPage,
+  type TrackerState
 } from '@repo/project-tracker';
 
 import {
@@ -61,6 +62,8 @@ function initial(): TrackerState {
     assigneeWrites: {},
     personWrites: {},
     detailWrites: {},
+    taskPreferences: {},
+    scratchNotes: {},
   };
 }
 
@@ -90,6 +93,25 @@ afterEach(async () => {
 });
 
 describe('task refresh', () => {
+  test('retains local data when the refreshed page omits the task', async () => {
+    // Arrange: independent stores start with the same remote task.
+    const app = store();
+    const other = store();
+    const local = createLocalActions({ getState: app.getState, dispatch: app.dispatch, createId: () => 'note' });
+
+    expect(local.setStarred({ taskId: 'old', starred: true })).toEqual({ status: 'success' });
+    expect(local.addNote('Remember')).toEqual({ status: 'success' });
+
+    // Act: replace the visible query with a page that omits the task.
+    await app.dispatch(refreshTasks({ fetchPage: async () => page('fresh', null, false) }));
+
+    // Assert: local data survives and does not leak to the other store.
+    expect(app.getState().taskPreferences.old?.starred).toBe(true);
+    expect(app.getState().scratchNotes.note?.text).toBe('Remember');
+    expect(other.getState().taskPreferences).toEqual({});
+    expect(other.getState().scratchNotes).toEqual({});
+  });
+
   test('refreshes one page and continues from its new cursor', async () => {
     // Arrange: the visible result contains three pages from an older cursor chain.
     const app = store();

@@ -28,6 +28,7 @@ import { trackerActions } from './reducer';
 import { EffectStore } from './effectStore';
 
 import { createTrackerDatabase } from '@repo/project-tracker/database';
+import { createLocalActions } from '@repo/project-tracker';
 import type {
   FieldWrite,
   TaskPriority,
@@ -537,6 +538,25 @@ describe('Effect project tracker', () => {
       expect.objectContaining({ after: cursor })
     );
     expect(store.getSnapshot().result.ids).toHaveLength(40);
+  });
+
+  test('preserves local preferences when a remote status write rolls back', async () => {
+    // Arrange: begin a failing remote write.
+    vi.useFakeTimers();
+    const store = createAppStore();
+    const original = store.getSnapshot().tasks['ATL-01']?.status;
+    const pending = store.dispatch(saveStatus({ taskId: 'ATL-01', value: 'done', fail: true }));
+    const local = createLocalActions({ getState: store.getSnapshot, dispatch: store.dispatch, createId: () => 'note' });
+
+    expect(local.setStarred({ taskId: 'ATL-01', starred: true })).toEqual({ status: 'success' });
+
+    // Act: settle the rejected remote write.
+    await vi.advanceTimersByTimeAsync(700);
+    await pending;
+
+    // Assert: only the remote field rolled back.
+    expect(store.getSnapshot().tasks['ATL-01']?.status).toBe(original);
+    expect(store.getSnapshot().taskPreferences['ATL-01']).toEqual({ taskId: 'ATL-01', starred: true });
   });
 
   test.each([false, true])(

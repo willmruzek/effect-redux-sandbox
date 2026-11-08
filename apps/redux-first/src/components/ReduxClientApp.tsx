@@ -9,9 +9,10 @@ import {
   useStore
 } from 'react-redux';
 
-import type {
-  TrackerSource,
-  TrackerState
+import {
+  createLocalActions,
+  type TrackerSource,
+  type TrackerState
 } from '@repo/project-tracker';
 import { ProjectTracker } from '@repo/project-tracker/react';
 
@@ -61,6 +62,11 @@ export function ReduxHome({ onOpenTask }: Readonly<{ onOpenTask: (taskId: string
   const state = useAppSelector((state) => ({ ...state }), shallowEqual);
 
   const dispatch = useAppDispatch();
+  const local = createLocalActions({
+    getState: store.getState,
+    dispatch,
+    createId: () => crypto.randomUUID(),
+  });
 
   return (
     <ProjectTracker
@@ -93,6 +99,9 @@ export function ReduxHome({ onOpenTask }: Readonly<{ onOpenTask: (taskId: string
       onRenamePerson={(input) => dispatch(renamePerson(input))}
       onSelectSourceMode={(mode) => dispatch(selectSourceMode(mode))}
       onOpenTask={onOpenTask}
+      onSetStarred={local.setStarred}
+      onAddNote={local.addNote}
+      onDeleteNote={local.deleteNote}
     />
   );
 }

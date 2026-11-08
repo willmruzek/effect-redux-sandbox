@@ -10,9 +10,10 @@ import {
   vi
 } from 'vitest';
 
-import type {
-  Task,
-  TrackerState
+import {
+  createLocalActions,
+  type Task,
+  type TrackerState
 } from '@repo/project-tracker';
 import {
   createGraphqlHandler,
@@ -75,6 +76,8 @@ function arrange() {
     assigneeWrites: {},
     personWrites: {},
     detailWrites: {},
+    taskPreferences: {},
+    scratchNotes: {},
   };
   const runtime = ManagedRuntime.make(Layer.empty);
 
@@ -117,17 +120,26 @@ describe('task deletion', () => {
       repository,
       fetcher
     } = arrange();
+    const local = createLocalActions({ getState: app.getSnapshot, dispatch: app.dispatch, createId: () => 'note' });
+
+    expect(local.setStarred({ taskId: 'a', starred: true })).toEqual({ status: 'success' });
 
     // Act: start deletion, then allow the server write and refresh to finish.
     const pending = app.dispatch(deleteTask({ taskId: 'a' }));
 
     expect(app.getSnapshot().deletions.a).toMatchObject({ status: 'saving' });
+    expect(app.getSnapshot().taskPreferences.a?.starred).toBe(true);
+    expect(local.setStarred({ taskId: 'a', starred: false })).toEqual({
+      status: 'error',
+      error: 'Task deletion is pending.',
+    });
     await vi.advanceTimersByTimeAsync(700);
     await pending;
 
     // Assert: the row and its local request metadata are removed; the query refreshes once.
     expect(repository.read().tasks.map((task) => task.id)).toEqual(['b']);
     expect(app.getSnapshot().tasks.a).toBeUndefined();
+    expect(app.getSnapshot().taskPreferences.a).toBeUndefined();
     expect(app.getSnapshot().deletions.a).toBeUndefined();
     expect(app.getSnapshot().result.totalCount).toBe(1);
     expect(fetcher.mock.calls.filter(([, init]) => typeof init.body === 'string'
@@ -141,6 +153,9 @@ describe('task deletion', () => {
       vi.useFakeTimers();
 
       const { app, repository } = arrange();
+      const local = createLocalActions({ getState: app.getSnapshot, dispatch: app.dispatch, createId: () => 'note' });
+
+      expect(local.setStarred({ taskId: 'a', starred: true })).toEqual({ status: 'success' });
 
       // Act: request a deliberate server failure.
       const pending = app.dispatch(deleteTask({ taskId: 'a', fail: true }));
@@ -151,6 +166,7 @@ describe('task deletion', () => {
       // Assert: optimistic hiding rolls back without changing the server.
       expect(repository.read().tasks.map((task) => task.id)).toEqual(['a', 'b']);
       expect(app.getSnapshot().tasks.a?.title).toBe('Task A');
+      expect(app.getSnapshot().taskPreferences.a?.starred).toBe(true);
       expect(app.getSnapshot().deletions.a).toMatchObject({ status: 'error' });
     }
   );

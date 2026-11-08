@@ -5,7 +5,8 @@ import type {
   Project,
   Task,
   TaskCreation,
-  TaskCreateInput
+  TaskCreateInput,
+  TaskPreference
 } from './index.js';
 
 export type TaskCreationPanelProps = {
@@ -13,9 +14,11 @@ export type TaskCreationPanelProps = {
   readonly people: readonly Person[];
   readonly tasks: Readonly<Record<string, Task>>;
   readonly creations: Readonly<Record<string, TaskCreation>>;
+  readonly preferences: Readonly<Record<string, TaskPreference>>;
   readonly onCreate: (input: TaskCreateInput, fail: boolean) => Promise<unknown>;
   readonly onRetry: (operationId: string, fail: boolean) => Promise<unknown>;
   readonly onDiscard: (operationId: string) => void;
+  readonly onSetStarred: (input: Readonly<{ taskId: string; starred: boolean }>) => void;
 };
 
 export function TaskCreationPanel({
@@ -23,9 +26,11 @@ export function TaskCreationPanel({
   people,
   tasks,
   creations,
+  preferences,
   onCreate,
   onRetry,
-  onDiscard
+  onDiscard,
+  onSetStarred
 }: TaskCreationPanelProps) {
   const [draft, setDraft] = useState<TaskCreateInput>({
     title: '',
@@ -111,6 +116,12 @@ export function TaskCreationPanel({
 
             return (
               <article key={operationId} data-operation-id={operationId}>
+                <button type="button" className="local-star"
+                  aria-label={`${preferences[task.id]?.starred ? 'Unstar' : 'Star'} task ${task.id}`}
+                  aria-pressed={preferences[task.id]?.starred ?? false}
+                  onClick={() => onSetStarred({ taskId: task.id, starred: !preferences[task.id]?.starred })}>
+                  {preferences[task.id]?.starred ? '★' : '☆'}
+                </button>
                 <div><strong>{task.title || '(Untitled draft)'}</strong><small>{task.id}</small>
                   <span role="status">{creation.status === 'saving' ? 'Creating...' : creation.status === 'created' ? 'Saved. Server query determines ledger placement.' : 'Creation failed'}</span>
                 </div>

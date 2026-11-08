@@ -30,6 +30,8 @@ function createSource() {
     peopleRequest: { status: 'idle' },
     creations: {},
     deletions: {},
+    taskPreferences: {},
+    scratchNotes: {},
     projects: {
       a: {
         id: 'a',
@@ -126,6 +128,9 @@ describe('backend-driven tracker view', () => {
   const selectSourceMode = vi.fn<(sourceMode: TrackerSourceMode) => Promise<void>>(async () => { });
   const saveAssignee = vi.fn(async () => { });
   const renamePerson = vi.fn(async () => { });
+  const setStarred = vi.fn(() => ({ status: 'success' } satisfies import('./index.js').LocalResult));
+  const addNote = vi.fn(() => ({ status: 'error', error: 'Enter a note.' } satisfies import('./index.js').LocalResult));
+  const deleteNote = vi.fn(() => ({ status: 'success' } satisfies import('./index.js').LocalResult));
   function render(strict = false): void {
     const app = <ProjectTracker
       implementation="Effect First" source={source} state={source.getSnapshot()}
@@ -136,6 +141,7 @@ describe('backend-driven tracker view', () => {
       onSaveAssignee={saveAssignee} onRenamePerson={renamePerson}
       onSelectSourceMode={selectSourceMode}
       onOpenTask={openTask}
+      onSetStarred={setStarred} onAddNote={addNote} onDeleteNote={deleteNote}
     />;
 
     root.render(strict ? <StrictMode>{app}</StrictMode> : app);
@@ -164,11 +170,43 @@ describe('backend-driven tracker view', () => {
     selectSourceMode.mockClear();
     saveAssignee.mockClear();
     renamePerson.mockClear();
+    setStarred.mockClear();
+    addNote.mockClear();
+    deleteNote.mockClear();
     source = createSource();
     container = document.createElement('div');
     document.body.append(container);
     root = createRoot(container);
     await act(async () => render());
+  });
+
+  test('delegates task stars to the local action boundary', async () => {
+    // Arrange: the visible task has no preference.
+    const star = container.querySelector<HTMLButtonElement>('[aria-label="Star task 7"]');
+
+    if (!star)
+      throw new Error('Missing star button.');
+
+    // Act: change its preference.
+    await act(async () => star.click());
+
+    // Assert: the local boundary receives the intended value.
+    expect(setStarred).toHaveBeenCalledExactlyOnceWith({ taskId: '7', starred: true });
+  });
+
+  test('shows local note validation failures', async () => {
+    // Arrange: the input is empty.
+    const form = container.querySelector<HTMLFormElement>('[aria-label="Add scratch note"]');
+
+    if (!form)
+      throw new Error('Missing note form.');
+
+    // Act: submit the invalid note.
+    await act(async () => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+
+    // Assert: the boundary error is visible.
+    expect(addNote).toHaveBeenCalledExactlyOnceWith('');
+    expect(container.textContent).toContain('Enter a note.');
   });
 
   test('requires explicit confirmation before deleting a task', async () => {

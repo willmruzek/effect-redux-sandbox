@@ -1,6 +1,6 @@
 # 0008: Local data in the frontend database
 
-**Status: TO BE IMPLEMENTED**
+**Status: IMPLEMENTED**
 
 ## Goal
 
@@ -31,13 +31,32 @@ their own remote tables.
 Local-only means not sent to the server; it does not imply durable persistence,
 offline synchronization, private storage or future server ownership.
 
+## Approved demonstration
+
+Both tracker apps use the shared UI to demonstrate:
+
+- A star toggle on each task, backed by a local companion record containing
+  the task ID and a `starred` boolean. Missing records read as unstarred.
+  Once toggled, retain an explicit record even when `starred` is false.
+- A local scratch-note list with generated IDs and trimmed, non-empty text.
+  Support adding and deleting notes, but not editing or an arbitrary length
+  limit. Reject invalid additions and deletion of unknown notes visibly.
+
+Local actions are synchronous and do not start requests. Validation failures
+return an explicit typed success/error result to the caller, which displays
+the error in the relevant UI; invalid writes do not change store state.
+Generate note IDs outside reducers and keep state and actions data-only.
+
 ## Configuration and write boundaries
 
-- Declare local versus remote ownership at the table boundary, separately from
-  operation execution. Keep declarations outside reducer state.
+- Use typed app-owned table declarations to describe local versus remote
+  ownership, separately from operation execution and outside reducer state.
+  Declarations do not automatically route writes or enforce ownership.
 - Remote write definitions use explicit typed transport inputs that contain only
-  server-owned fields. Do not serialize an entire frontend view or infer
-  transport eligibility from arbitrary field values.
+  server-owned fields, constructed explicitly at the transport boundary.
+  Type annotations alone do not remove extra runtime properties; do not
+  serialize an entire frontend view or infer transport eligibility from
+  arbitrary field values.
 - Local writes validate and synchronously dispatch ordinary data actions. Do not
   simulate an HTTP request, pending ownership or successful remote confirmation.
 - A user intent affecting both categories separates its local commit from its
@@ -46,9 +65,10 @@ offline synchronization, private storage or future server ownership.
 - Preserve app-owned domain policy and separate Redux/Effect implementations.
   Reuse current slices and workflows before introducing new generic helpers.
 
-Before implementation, settle the concrete table declaration API and the
-demonstration domain. Any public API change requires an explicit decision; this
-plan does not prescribe a new schema DSL or compatibility wrapper.
+Use explicit app-owned write paths rather than a new schema DSL or automatic
+transport routing. Adding tables changes the tracker state shape: migrate all
+in-repository constructors and consumers together rather than accepting old
+snapshots through compatibility shims.
 
 ## TanStack DB integration
 
@@ -66,13 +86,18 @@ plan does not prescribe a new schema DSL or compatibility wrapper.
 
 ## Deletion, retention and hydration
 
-Define these policies explicitly before implementing their behavior:
-
-- Whether authoritative deletion of a remote entity removes its local companion
-  record or retains it, and how that differs from temporary query absence.
-- What happens to companion records if remote creation replaces a temporary ID.
-- Which local data, if any, is serialized into SSR hydration. Browser-only data
-  must not leak into server snapshots or other store instances.
+- Confirmed task deletion removes its local preference. Pending or failed
+  deletion, filtering and absence from a query page do not remove it.
+  Reject preference changes while deletion is pending and reject changes for
+  nonexistent tasks.
+- Allow preferences on temporary tasks, including failed creation drafts.
+  On successful creation, move the temporary preference to the server ID and
+  remove the temporary record. If the server ID already has a preference, that
+  existing record wins, including an explicit unstarred value. Discarding a
+  draft removes its preference.
+- Start both local tables empty during SSR and hydration. Browser changes remain
+  in the in-memory store until reload; do not restore or persist them in this
+  plan. Keep stores isolated across requests and browser instances.
 
 Query-result membership, normalized entity retention and local-data retention
 are different concerns. Server reads and first-page refresh must not erase local
@@ -84,12 +109,14 @@ cross-tab synchronization and offline queues require separate plans.
 
 ## Test-first implementation stages
 
-1. Agree on the table ownership contract and a small demonstration of a local
-   entity plus a local companion record. Resolve deletion and hydration policy.
-2. Add focused public-consumer tests for both store approaches before adding
-   ownership declarations and local actions.
+1. Add focused tests for both store approaches before adding the app-owned
+   ownership declarations, local actions and approved tracker UI.
+2. Cover validation, empty SSR/hydration state, deletion, draft ID remapping
+   and collision handling, including explicit false preferences.
 3. Verify typed remote inputs and merges cannot carry or overwrite local fields.
-   Preserve the existing remote request and write lifecycle behavior.
+   Verify actual serialized payloads exclude local fields. Test local and
+   remote write independence without adding a combined UI workflow; preserve
+   existing remote request and write lifecycle behavior.
 4. Add TanStack DB projection tests for local updates, optional joins and store
    isolation, then wire the agreed application example.
 5. Update README, comparison guide and this plan to describe the implemented
@@ -97,18 +124,34 @@ cross-tab synchronization and offline queues require separate plans.
 
 ## Acceptance checklist
 
-- [ ] Local-only records and remote records coexist in normalized store state.
-- [ ] Local writes are synchronous, validated and perform zero transport calls.
-- [ ] Server reads, refresh and confirmations preserve local companion data.
-- [ ] Failed remote writes do not roll back independent local changes.
-- [ ] Typed remote payloads exclude local fields.
-- [ ] Optional companion joins retain remote entities when local rows are absent.
-- [ ] Local actions update reactive projections without a request.
-- [ ] Deletion, temporary-ID and hydration policies are documented and tested.
-- [ ] Local data and resources remain isolated between store instances.
-- [ ] State and reducer outputs contain only data.
-- [ ] Existing shared reads, generated API reducers and remote workflows pass.
-- [ ] Workspace lint, type-check, tests and production builds pass.
+- [x] Local-only records and remote records coexist in normalized store state.
+- [x] Local writes are synchronous, validated and perform zero transport calls.
+- [x] Both apps expose task stars and scratch-note add/delete in the shared UI.
+- [x] Invalid local writes return explicit errors, display them and leave state unchanged.
+- [x] Missing preferences default to unstarred; explicit false records are retained.
+- [x] Server reads, refresh and confirmations preserve local companion data.
+- [x] Failed remote writes do not roll back independent local changes.
+- [x] Explicitly constructed and serialized remote payloads exclude local fields.
+- [x] Optional companion joins retain remote entities when local rows are absent.
+- [x] Local actions update reactive projections without a request.
+- [x] Confirmed deletion, draft discard, ID remapping and collision policies are tested.
+- [x] Pending/failed deletion and query absence preserve preferences.
+- [x] Local tables start empty on SSR and hydration and are not persisted.
+- [x] Local data and resources remain isolated between store instances.
+- [x] State and reducer outputs contain only data.
+- [x] Existing shared reads, generated API reducers and remote workflows pass.
+- [x] Workspace lint, type-check, tests and production builds pass.
+
+## Completed outcome
+
+The shared tracker owns the table declarations, local validation and read-only
+projection; each app composes the local actions and retains its own remote
+workflow and lifecycle reducers. Task preferences use `{ taskId, starred }`;
+scratch notes use `{ id, text }`. The UI exposes both local data types, and
+GraphQL and REST creation inputs are explicitly constructed from remote fields.
+
+The full workspace passed lint, type-check, 563 tests and both production builds.
+The behavior is in-memory only; the separate offline-first roadmap is unchanged.
 
 ## Scope exclusions
 

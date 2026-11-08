@@ -49,6 +49,8 @@ describe('task creation panel', () => {
         }
       },
       creations: {},
+      preferences: {},
+      onSetStarred: vi.fn(),
 
       onCreate: vi.fn(async () => { }),
 
@@ -107,12 +109,13 @@ describe('task creation panel', () => {
     // Act: project store-owned creation metadata into the UI.
     await act(async () => root.render(<TaskCreationPanel {...props} />));
 
-    // Assert: draft rows have no pretend backend membership or editable fields.
+    // Assert: draft rows have a local star, but no remote retry or discard while pending.
     expect(container.textContent).toContain('Pending creations');
     expect(container.textContent).toContain('Not part of server-ranked results');
     expect(container.textContent).toContain('Retained draft');
     expect(container.textContent).toContain('Creating');
-    expect(container.querySelector('[data-operation-id="op"] button')).toBeNull();
+    expect(container.querySelector('[aria-label="Star task temp:op"]')).not.toBeNull();
+    expect(container.querySelector('[data-operation-id="op"] .creation-actions')).toBeNull();
   });
 
   test('offers explicit retry and discard for a failed draft', async () => {
@@ -130,7 +133,7 @@ describe('task creation panel', () => {
     };
     await act(async () => root.render(<TaskCreationPanel {...props} />));
 
-    const buttons = container.querySelectorAll<HTMLButtonElement>('[data-operation-id="op"] button');
+    const buttons = container.querySelectorAll<HTMLButtonElement>('[data-operation-id="op"] .creation-actions button');
     const retry = buttons[0];
     const discard = buttons[1];
 
