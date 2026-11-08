@@ -1,0 +1,25 @@
+{
+  "name": "@repo/effect-store-logger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@repo/effect-store": "workspace:*"
+  },
+  "devDependencies": {
+    "@repo/tsconfig": "workspace:*",
+    "effect": "^4.1.2",
+    "typescript": "^5.0.0",
+    "vitest": "^5.1.0"
+  }
+}

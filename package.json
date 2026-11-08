@@ -6,8 +6,8 @@
   "scripts": {
     "build": "pnpm --recursive --if-present run build",
     "lint": "eslint .",
-    "test": "pnpm --recursive --if-present run test",
-    "typecheck": "pnpm --recursive --if-present run typecheck"
+    "test": "pnpm --filter './packages/*' --recursive run build && pnpm --recursive --if-present run test",
+    "typecheck": "pnpm --filter './packages/*' --recursive run build && pnpm --recursive --if-present run typecheck"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
