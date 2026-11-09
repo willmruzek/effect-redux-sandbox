@@ -12,3 +12,9 @@ subtree. It is read-only reference material, not application code.
 - Import from normal package dependencies (`effect`), never from `repos/`.
 - Do not include vendored repositories in application builds, tests, or linting.
 - See [README.md](README.md) for workspace commands and subtree maintenance.
+
+# Planning
+
+- Before writing an implementation plan or making one development-ready, use
+  the [write-plan skill](.agents/skills/write-plan/SKILL.md). Resolve
+  consequential decisions with the user before drafting the plan.
