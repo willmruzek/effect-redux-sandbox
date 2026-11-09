@@ -6,4 +6,4 @@ integration. Keep Redux/custom-store implementations and their tests app-local.
 
 Only store-independent UI, domain data, fake APIs, GraphQL utilities and
 lint/TypeScript configuration belong in shared packages. See the
-[workspace README](../README.md) for dispatch contracts and demo behavior.
+[comparison](../COMPARISON.md) for dispatch contracts and demo behavior.

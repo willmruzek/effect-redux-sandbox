@@ -76,9 +76,9 @@ different or out of scope, not a missing implementation) · 📋 Planned.
 Cells marked "Planned" describe goals in the
 [library roadmap](../README.md#library-roadmap), not implemented capabilities.
 
-Our packages are focused store and request-lifecycle primitives, not replacements
-for the broader cache and synchronization features of TanStack Query or RTK
-Query. The repo uses Redux Toolkit, but does not use RTK Query. For feature
+Our packages currently focus on store and request-lifecycle primitives; the broader
+cache and synchronization features of TanStack Query and RTK Query remain
+roadmap items. The repo uses Redux Toolkit, but does not use RTK Query. For feature
 details, see the official [TanStack Query overview](https://tanstack.com/query/latest/docs/framework/react/overview),
 [RTK Query overview](https://redux-toolkit.js.org/rtk-query/overview) and
 [RTK Query cache behavior](https://redux-toolkit.js.org/rtk-query/usage/cache-behavior).
@@ -196,9 +196,10 @@ The shared UI knows callbacks and state, not store services or request APIs.
 | [store workflows](../apps/redux-first/src/store.ts) obtain `ReduxStore` | [flows](../apps/effect-first/src/flows.ts) obtain `EffectStore` |
 | [middleware](../apps/redux-first/src/effectMiddleware.ts) supplies the service and executes external programs through the app runtime | [core store](../packages/effect-store/src/index.ts) supplies the service and executes external programs through the app runtime |
 
-Each workflow checks current loading/exhaustion state, prepares query/cursor
-variables and chooses the transport. GraphQL uses the operation document;
-REST supplies an execution callback. Mixed mode keeps people ownership separate.
+Each workflow prepares the query identity and chooses the transport, then calls
+its toolkit's cursor pagination definition. Pagination checks eligibility and
+selects the cursor. GraphQL uses the operation document; REST supplies an
+execution callback. Mixed mode keeps people ownership separate.
 
 ### 3. The normalized request runner publishes lifecycle actions
 
@@ -220,8 +221,10 @@ Latest-wins ownership guards prevent an older read settling over a newer one.
 [Redux reducer composition](../apps/redux-first/src/trackerApiReducers.ts) and
 [Effect reducer composition](../apps/effect-first/src/trackerApiReducers.ts)
 run guarded domain reducers before the generated API reducer.
-Domain callbacks update visible notices and merge normalized entities/result
-membership using shared helpers; the API reducer owns request metadata.
+Domain callbacks update visible notices; the API reducer owns request metadata.
+After the result-bearing query succeeds, the pagination reducer validates
+ownership and cursor progression and merges normalized entities and result
+membership together with the cursor, using the app's shared merge helper.
 No second GraphQL response tree or endpoint-result cache is stored.
 
 ### 5. The store publishes; the projection and UI react
