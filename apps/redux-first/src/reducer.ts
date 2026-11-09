@@ -20,6 +20,7 @@ import {
 import { operationActions } from './trackerOperations';
 import { trackerApiReducer } from './trackerApiReducers';
 import { trackerOperationReducer } from './trackerOperationReducers';
+import { trackerInvalidation } from './trackerInvalidation';
 
 const tracker = createSlice({
   name: 'tracker',
@@ -106,7 +107,8 @@ const tracker = createSlice({
 });
 
 export function rootReducer(state: RootState | undefined, action: UnknownAction): RootState {
-  const readState = trackerApiReducer(state, action);
+  const invalidationState = trackerInvalidation.reducer(state ?? createTrackerApiState(), action);
+  const readState = trackerApiReducer(invalidationState, action);
   const operationState = trackerOperationReducer(readState, action);
 
   const next = tracker.reducer(operationState, action);

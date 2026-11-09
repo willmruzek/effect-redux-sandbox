@@ -1,6 +1,8 @@
 import { createEntityTable, variablesKey } from '@repo/gql-api';
 import {
+  cursorChainKey,
   validateCursorPage,
+  type InvalidationState,
   type RequestApiOptions,
   type RequestApiState,
   type CursorPaginationState
@@ -23,9 +25,12 @@ import {
   trackerPageOperation
 } from '@repo/tracker-graphql/client';
 
+import { pageTags, taskPageTags, trackerInvalidation, type TrackerTag } from './trackerInvalidation';
+
 export type TrackerApiState = TrackerViewState & {
   readonly api: RequestApiState;
   readonly detail: TaskDetailState;
+  readonly invalidation: InvalidationState<TrackerTag>;
   readonly pagination: CursorPaginationState<string>;
 };
 
@@ -60,11 +65,13 @@ const tasks = createEntityTable({
 });
 
 export function createTrackerApiState(initial: TrackerState = createInitialState()): TrackerApiState {
-  return {
+  const identity = variablesKey({ query: initial.result.query, sourceMode: 'graphql' });
+  const state: TrackerApiState = {
     ...initial,
     api: { requests: {}, latest: {} },
+    invalidation: { revision: 0, queries: {}, history: [] },
     pagination: {
-      identity: variablesKey({ query: initial.result.query, sourceMode: 'graphql' }),
+      identity,
       cursor: initial.result.pageInfo.endCursor,
       exhausted: initial.request.status === 'complete',
       pending: null,
@@ -76,6 +83,11 @@ export function createTrackerApiState(initial: TrackerState = createInitialState
     deletions: {},
     detail: { status: 'idle' },
   };
+
+  return trackerInvalidation.reducer(state, trackerInvalidation.actions.seed({
+    identity: cursorChainKey('trackerTasks', identity),
+    tags: pageTags(initial.result.ids, Object.keys(initial.people)),
+  }));
 }
 
 function normalizePage({ page, loadedPages }: TrackerRead, variables: TaskVariables): NormalizedTaskPage {
@@ -122,6 +134,11 @@ export const trackerApiOptions = {
       normalize: normalizePage,
 
       scope: () => 'tasks',
+      provides: {
+        registry: trackerInvalidation,
+        fromVariables: () => [{ type: 'TaskList' }],
+        fromResult: taskPageTags,
+      },
     }),
   }),
 } satisfies RequestApiOptions<TrackerApiState, 'trackerApi', Readonly<Record<string, unknown>>>;

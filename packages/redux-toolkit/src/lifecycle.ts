@@ -2,7 +2,7 @@ import {
   Cause,
   Effect
 } from 'effect';
-import type { Draft } from 'immer';
+import { original, type Draft } from 'immer';
 
 import type {
   ActionCreator,
@@ -10,6 +10,11 @@ import type {
   PayloadAction
 } from './contracts.js';
 import type { RequestOutcome } from './engine.js';
+import type {
+  InvalidationRegistry,
+  InvalidationTag,
+} from './invalidation.js';
+import { PostCommitError } from './postCommitError.js';
 
 type Started<Input> = Input & { readonly requestId: string };
 
@@ -28,7 +33,7 @@ type LifecycleReducers<State, Input, Result, Pending> = {
   readonly onFailed: (state: Draft<State>, payload: Failed<Input>, pending: Pending) => void;
 };
 
-type Lifecycle<State, Prefix extends string, Input, Result, Pending> = {
+type Lifecycle<State, Prefix extends string, Input, Result, Pending, Action = never> = {
   readonly actions: {
     readonly started: ActionCreator<Started<Input>, `${Prefix}Started`>;
     readonly confirmed: ActionCreator<Confirmed<Input, Result>, `${Prefix}Confirmed`>;
@@ -46,6 +51,7 @@ type Lifecycle<State, Prefix extends string, Input, Result, Pending> = {
         | PayloadAction<Started<Input>, `${Prefix}Started`>
         | PayloadAction<Confirmed<Input, Result>, `${Prefix}Confirmed`>
         | PayloadAction<Failed<Input>, `${Prefix}Failed`>
+        | Action
       ) => Effect.Effect<unknown>;
     };
     readonly input: Input;
@@ -69,15 +75,28 @@ export function createRequestLifecycle<State, Result>() {
     const Prefix extends string,
     Input extends object,
     Pending extends { readonly requestId: string },
+    const Name extends string = never,
+    Action = never,
   >(
     prefix: Prefix,
     options: {
       readonly pending: (state: State | Draft<State>, input: Input) => Pending | undefined;
+      readonly invalidation?: {
+        readonly registry: InvalidationRegistry<State, Name, Action>;
+        readonly tags: (input: Input, result: Result) => readonly InvalidationTag<Name>[];
+      };
     },
-  ): Lifecycle<State, Prefix, Input, Result, Pending> {
+  ): Lifecycle<State, Prefix, Input, Result, Pending, Action> {
     const started = createAction<Started<Input>, `${Prefix}Started`>(`${prefix}Started`);
     const confirmed = createAction<Confirmed<Input, Result>, `${Prefix}Confirmed`>(`${prefix}Confirmed`);
     const failed = createAction<Failed<Input>, `${Prefix}Failed`>(`${prefix}Failed`);
+    const invalidation = options.invalidation;
+
+    invalidation?.registry.registerMutation({
+      action: confirmed,
+      owns: (state, payload) => options.pending(state, payload)?.requestId === payload.requestId,
+      tags: (payload) => invalidation.tags(payload, payload.result),
+    });
 
     return {
       actions: {
@@ -100,6 +119,12 @@ export function createRequestLifecycle<State, Result>() {
           if (!pending || pending.requestId !== payload.requestId)
             return;
 
+          if (invalidation && !invalidation.registry.hasReceipt(
+            original<State>(state),
+            invalidation.registry.mutationReceipt(payload.requestId),
+          ))
+            throw new Error(`Invalidation registry must run before ${prefix} confirmation.`);
+
           handlers.onConfirmed(state, payload, payload.result, pending);
         },
 
@@ -114,10 +139,14 @@ export function createRequestLifecycle<State, Result>() {
       }),
 
       run: Effect.fnUntraced(function*(
-        input: Parameters<Lifecycle<State, Prefix, Input, Result, Pending>['run']>[0],
+        input: Parameters<Lifecycle<State, Prefix, Input, Result, Pending, Action>['run']>[0],
       ): Effect.fn.Return<RequestOutcome, Error> {
+        if (invalidation)
+          yield* invalidation.registry.ensureInstalled({ store: input.store });
+
         const requestId = yield* Effect.sync(() => crypto.randomUUID());
         const payload = { ...input.input, requestId };
+        let serverCommitted = false;
 
         const perform = Effect.fnUntraced(function*() {
           yield* input.store.dispatch(started(payload));
@@ -130,6 +159,9 @@ export function createRequestLifecycle<State, Result>() {
             try: (signal) => input.execute(signal),
             catch: (error) => error instanceof Error ? error : new Error(String(error)),
           }));
+
+          if (result._tag === 'Success')
+            serverCommitted = true;
 
           if (options.pending(yield* input.store.getState, payload)?.requestId !== requestId) {
             return { status: 'superseded' } satisfies RequestOutcome;
@@ -145,14 +177,34 @@ export function createRequestLifecycle<State, Result>() {
           }
 
           yield* input.store.dispatch(confirmed({ ...payload, result: result.success }));
+
+          if (options.pending(yield* input.store.getState, payload)?.requestId === requestId)
+            return yield* Effect.fail(new Error(`Could not confirm ${prefix} request.`));
+
+          if (invalidation) {
+            const receipt = invalidation.registry.mutationReceipt(requestId);
+
+            if (!invalidation.registry.hasReceipt(yield* input.store.getState, receipt))
+              return yield* Effect.fail(new Error(`Could not invalidate ${prefix} request.`));
+
+            yield* input.store.dispatch(invalidation.registry.acknowledge(receipt));
+          }
+
           return { status: 'succeeded' } satisfies RequestOutcome;
         });
 
-        return yield* perform().pipe(Effect.onError((cause) =>
-          input.store.dispatch(failed({
-            ...payload,
-            error: Cause.hasInterruptsOnly(cause) ? 'Request interrupted.' : Cause.pretty(cause),
-          })).pipe(Effect.asVoid)));
+        return yield* perform().pipe(
+          Effect.catchCause((cause) =>
+            serverCommitted && !Cause.hasInterruptsOnly(cause)
+              ? Effect.fail(new PostCommitError(prefix, Cause.pretty(cause)))
+              : Effect.failCause(cause)),
+          Effect.onError((cause) => serverCommitted
+            ? Effect.void
+            : input.store.dispatch(failed({
+              ...payload,
+              error: Cause.hasInterruptsOnly(cause) ? 'Request interrupted.' : Cause.pretty(cause),
+            })).pipe(Effect.asVoid)),
+        );
       }),
     };
   };

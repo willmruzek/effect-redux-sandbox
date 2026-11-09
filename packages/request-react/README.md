@@ -8,7 +8,7 @@ Both `useQuery` and `useMutation` accept an operation, a subscription source and
 the operation's typed run input:
 
 ```tsx
-const { request, trigger } = useQuery({
+const { request, freshness, trigger } = useQuery({
   operation: api.operations.person,
   source: { subscribe: store.subscribe, getSnapshot: store.getState },
   input: {
@@ -34,6 +34,12 @@ record, including its request ID and, for failures and cancellations, its error.
 It tracks that key even when another caller starts the request. Changing
 variables switches observation without fetching. For a mutation, the status
 is keyed by variables too, not the most recent call from a component.
+
+`useQuery` also returns `freshness`: `uninitialized`, `fresh`, or `stale`.
+Configure the query's `provides` registry and dependency tags before using the
+hook; observing a query without invalidation dependencies throws. Freshness
+and request status come from the same store subscription. Observation and
+invalidation do not trigger transport. `useMutation` does not expose freshness.
 
 `trigger()` runs the operation with the current input and returns a Promise of
 its existing outcome. Expected transport failures resolve to a `failed` outcome;

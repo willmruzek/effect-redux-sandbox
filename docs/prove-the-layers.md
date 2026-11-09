@@ -60,9 +60,9 @@ artifact validation are not claimed.
 | Endpoint response cache | ✅ QueryClient cache | ✅ Redux API cache | 🧭 N/A — normalized entities live in app-owned store state instead |
 | Request identity | ✅ Query key | ✅ Endpoint and arguments | ✅ Canonical request keys and app-defined scopes |
 | Duplicate pending reads | ✅ Deduplicated | ✅ Cached/shared for matching endpoint arguments | ✅ Shared execution/outcome per operation, store service and canonical key |
-| Freshness and cache lifetime | ✅ Configurable | ✅ Subscription-based lifetime and refetch options | 📋 Planned — library-owned freshness and retention policies |
+| Freshness and cache lifetime | ✅ Configurable | ✅ Subscription-based lifetime and refetch options | 🟡 Explicit invalidation freshness; retention policies planned |
 | Background refetch | ✅ Configurable refetch policies | ✅ Configurable refetch behavior | 📋 Planned — currently explicit app refresh |
-| Mutation invalidation | ✅ Query invalidation | ✅ Tag invalidation | 📋 Planned — currently apps choose whether to refresh |
+| Mutation invalidation | ✅ Query invalidation | ✅ Tag invalidation | ✅ Typed tag invalidation; refresh remains explicit |
 | Optimistic writes | ✅ | ✅ | ✅ Optional field reducers; apps define transitions |
 | Failure rollback | ✅ | ✅ | ✅ Field helper restores the original value and records an error |
 | Stale-settlement protection | ✅ | ✅ | ✅ Explicit request ownership and latest-wins guards |
@@ -103,6 +103,18 @@ the normalized result. It shares the same in-flight execution as `run` for the
 same operation, stable store-service object and canonical variables. `run`
 retains its original outcome shape. The optional `execute` callback instead
 accepts a cursor and abort signal and returns a page directly.
+
+For an invalidation-enabled chain, configure the generated query with the same
+registry and pass `fence: { identity: pagination.key(request.identity),
+requestId: request.requestId }` to `runWithResult`. This carries the chain's
+start revision into the query guard. The query's `fromResult` and pagination's
+`fromPage` must describe the same page dependencies. Fenced query registrations
+are transient; the chain owns retained freshness rather than each cursor.
+The pagination reducer separately fences its later page and cursor commit.
+A stale chain returns `{ status: 'stale' }` from `next`; an eligible refresh
+or replacement is required before appending.
+Appends accumulate page tags, while a successful first-page refresh replaces
+them. No invalidation starts a refresh automatically.
 
 Generated query success handlers run before `runWithResult` returns. When
 composing with pagination, do not independently merge the page in that handler:

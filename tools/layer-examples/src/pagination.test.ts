@@ -1,10 +1,14 @@
 import {
   createCursorPagination as createReduxPagination,
+  createInvalidationRegistry as createReduxInvalidation,
   createRequestApi as createReduxApi,
+  type InvalidationState,
+  type InvalidationTag,
   type RequestApiState,
 } from '@repo/redux-toolkit';
 import {
   createCursorPagination as createEffectPagination,
+  createInvalidationRegistry as createEffectInvalidation,
   createRequestApi as createEffectApi,
 } from '@repo/effect-store-toolkit';
 import { Effect, Fiber } from 'effect';
@@ -50,9 +54,9 @@ const initial = (): State => ({
 });
 
 describe.each([
-  ['Redux', createReduxPagination, createReduxApi],
-  ['Effect', createEffectPagination, createEffectApi],
-])('%s cursor pagination', (_name, createPagination, createApi) => {
+  ['Redux', createReduxPagination, createReduxApi, createReduxInvalidation],
+  ['Effect', createEffectPagination, createEffectApi, createEffectInvalidation],
+])('%s cursor pagination', (_name, createPagination, createApi, createInvalidation) => {
   function setup() {
     const pagination = createPagination<State, string, Page>()({
       name: 'items',
@@ -201,6 +205,240 @@ describe.each([
     expect(firstOutcome).toEqual({ status: 'succeeded' });
     expect(secondOutcome).toEqual({ status: 'succeeded' });
     expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  function setupFenced(invalidateBeforePageCommit = false) {
+    type QueryState = State & {
+      readonly api: RequestApiState;
+      readonly invalidation: InvalidationState<'List' | 'Item'>;
+      readonly queryMerges: number;
+    };
+    const registry = createInvalidation<QueryState, 'List' | 'Item'>()({
+      name: 'items',
+      getState: (state) => state.invalidation,
+      setState: (state, invalidation) => ({ ...state, invalidation }),
+    });
+    const api = createApi({
+      name: 'items',
+      state: (state: QueryState) => state.api,
+      getState: (state) => state.api,
+      operations: (builder) => ({
+        page: builder.query('page', {
+          decode: (data: unknown, variables: { readonly after: string | null }): Page => ({
+            ids: data === null || variables.after === null ? [] : [variables.after], next: null,
+          }),
+          normalize: (page: Page) => page,
+          provides: {
+            registry,
+            fromVariables: () => [{ type: 'List' }],
+            fromResult: (page: Page): readonly InvalidationTag<'List' | 'Item'>[] =>
+              page.ids.map((id) => ({ type: 'Item', id })),
+          },
+        }),
+      }),
+    });
+    const queryReducer = api.operations.page.reducer({
+      onSuccess: (state) => { state.queryMerges += 1; },
+    });
+    const pagination = createPagination<QueryState, string, Page>()({
+      name: 'pages',
+      getState: (state) => state.pagination,
+      setState: (state, pagination) => { state.pagination = pagination; },
+      pageInfo: (page) => ({ cursor: page.next, hasNextPage: page.next !== null }),
+      merge: (state, page) => { state.ids = [...state.ids, ...page.ids]; },
+      invalidation: {
+        registry,
+        fromIdentity: () => [{ type: 'List' }],
+        fromPage: (page) => page.ids.map((id) => ({ type: 'Item', id })),
+      },
+    });
+    let state: QueryState = {
+      ...initial(),
+      api: { requests: {}, latest: {} },
+      invalidation: { revision: 0, queries: {}, history: [] },
+      queryMerges: 0,
+    };
+    state = registry.reducer(state, registry.actions.seed({
+      identity: pagination.key('a'), tags: [{ type: 'List' }],
+    }));
+    const store = {
+      getState: Effect.sync(() => state),
+      dispatch: (action: { readonly type: string }) => Effect.sync(() => {
+        if (invalidateBeforePageCommit && action.type === 'pages/pagination' && 'kind' in action && action.kind === 'succeeded') {
+          state = registry.reducer(state, registry.actions.invalidate({
+            tags: [{ type: 'Item', id: 'new' }],
+          }));
+        }
+
+        state = pagination.reducer(api.reducer(queryReducer(registry.reducer(state, action), action), action), action);
+      }),
+    };
+
+    return { api, pagination, registry, store, snapshot: () => state };
+  }
+
+  test('keeps a shared generated query alive when its pagination waiter is interrupted', async () => {
+    // Arrange: pagination starts a fenced query that another caller shares.
+    const { api, pagination, store, snapshot } = setupFenced();
+    let finish: (page: Page) => void = () => { throw new Error('Request did not start.'); };
+    let notifyStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const execute = vi.fn(() => new Promise<Page>((resolve) => {
+      finish = resolve;
+      notifyStarted();
+    }));
+    const paginated = Effect.runFork(pagination.next({
+      store,
+      identity: 'a',
+      query: (after, request) => api.operations.page.runWithResult({
+        store,
+        variables: { after },
+        fence: { identity: pagination.key(request.identity), requestId: request.requestId },
+        execute,
+      }),
+    }));
+    await started;
+    const external = Effect.runFork(api.operations.page.run({ store, variables: { after: 'one' }, execute }));
+    await Effect.runPromise(Effect.yieldNow);
+
+    // Act: interrupt only pagination and complete the shared transport.
+    await Effect.runPromise(Fiber.interrupt(paginated));
+    finish({ ids: ['new'], next: null });
+    const outcome = await Effect.runPromise(Fiber.join(external));
+
+    // Assert: the other waiter succeeds without a page or cursor commit.
+    expect(outcome).toEqual({ status: 'succeeded' });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(snapshot().queryMerges).toBe(1);
+    expect(snapshot().ids).toEqual(['old']);
+    expect(snapshot().pagination.cursor).toBe('one');
+    expect(snapshot().pagination.pending).toBeNull();
+  });
+
+  test('fences the page commit when invalidation follows generated query success', async () => {
+    // Arrange: invalidate the returned entity immediately before the page commit.
+    const { api, pagination, store, snapshot } = setupFenced(true);
+
+    // Act: complete a generated query and attempt to append its page.
+    const outcome = await Effect.runPromise(pagination.next({
+      store,
+      identity: 'a',
+      query: (after, request) => api.operations.page.runWithResult({
+        store,
+        variables: { after },
+        fence: { identity: pagination.key(request.identity), requestId: request.requestId },
+        execute: async () => ({ ids: ['new'], next: 'two' }),
+      }),
+    }));
+
+    // Assert: the earlier query success cannot advance the stale chain.
+    expect(outcome).toEqual({ status: 'superseded' });
+    expect(snapshot().queryMerges).toBe(1);
+    expect(snapshot().ids).toEqual(['old']);
+    expect(snapshot().pagination.cursor).toBe('one');
+    expect(pagination.selectFreshness(snapshot(), 'a')).toBe('stale');
+    expect(api.operations.page.selectFreshness(snapshot(), { after: 'one' })).toBe('uninitialized');
+  });
+
+  test('retains one chain dependency rather than a separate identity for each cursor', async () => {
+    // Arrange: append a page through an invalidation-enabled generated query.
+    const { api, pagination, registry, store, snapshot } = setupFenced();
+    await Effect.runPromise(pagination.next({
+      store,
+      identity: 'a',
+      query: (after, request) => api.operations.page.runWithResult({
+        store,
+        variables: { after },
+        fence: { identity: pagination.key(request.identity), requestId: request.requestId },
+        execute: async () => ({ ids: ['new'], next: 'two' }),
+      }),
+    }));
+
+    // Act: invalidate the newly appended entity.
+    const outcome = await Effect.runPromise(registry.invalidate({
+      store, tags: [{ type: 'Item', id: 'new' }],
+    }));
+
+    // Assert: only the chain, not an additional per-cursor query, is retained.
+    expect(outcome).toEqual({ matched: 1 });
+    expect(pagination.selectFreshness(snapshot(), 'a')).toBe('stale');
+  });
+
+  test('retains the stale window and cursor when a first-page refresh fails', async () => {
+    // Arrange: an established chain is stale before refresh.
+    const { pagination, registry, store, snapshot } = setupFenced();
+    await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'List' }] }));
+
+    // Act: the replacement request fails.
+    const outcome = await Effect.runPromise(pagination.refresh({
+      store,
+      identity: 'a',
+      execute: async () => { throw new Error('Offline'); },
+    }));
+
+    // Assert: a failure does not clear staleness or replace existing data.
+    expect(outcome).toEqual({ status: 'failed', error: 'Offline' });
+    expect(snapshot().ids).toEqual(['old']);
+    expect(snapshot().pagination.cursor).toBe('one');
+    expect(pagination.selectFreshness(snapshot(), 'a')).toBe('stale');
+  });
+
+  test('does not replace a stale window when the refresh is invalidated in flight', async () => {
+    // Arrange: start a first-page refresh after the established chain becomes stale.
+    const { api, pagination, registry, store, snapshot } = setupFenced();
+    await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'List' }] }));
+    let finish: (page: Page) => void = () => { throw new Error('Refresh did not start.'); };
+    let notifyStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const refresh = Effect.runPromise(pagination.refresh({
+      store,
+      identity: 'a',
+      query: (after, request) => api.operations.page.runWithResult({
+        store,
+        variables: { after },
+        fence: { identity: pagination.key(request.identity), requestId: request.requestId },
+        execute: () => new Promise<Page>((resolve) => {
+          finish = resolve;
+          notifyStarted();
+        }),
+      }),
+    }));
+    await started;
+
+    // Act: invalidate an entity discovered by the refresh, then finish it.
+    await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'Item', id: 'new' }] }));
+    finish({ ids: ['new'], next: 'two' });
+    const outcome = await refresh;
+
+    // Assert: the later invalidation cannot be cleared by this refresh.
+    expect(outcome).toEqual({ status: 'superseded' });
+    expect(snapshot().queryMerges).toBe(0);
+    expect(snapshot().ids).toEqual(['old']);
+    expect(snapshot().pagination.cursor).toBe('one');
+    expect(pagination.selectFreshness(snapshot(), 'a')).toBe('stale');
+  });
+
+  test('retains a stale window when a first-page refresh is interrupted', async () => {
+    // Arrange: keep a refresh pending after invalidating the established chain.
+    const { pagination, registry, store, snapshot } = setupFenced();
+    await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'List' }] }));
+    let notifyStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const refresh = Effect.runFork(pagination.refresh({
+      store,
+      identity: 'a',
+      execute: () => new Promise<Page>(() => { notifyStarted(); }),
+    }));
+    await started;
+
+    // Act: interrupt the refresh.
+    await Effect.runPromise(Fiber.interrupt(refresh));
+
+    // Assert: the last good page remains stale and retryable.
+    expect(snapshot().ids).toEqual(['old']);
+    expect(snapshot().pagination.cursor).toBe('one');
+    expect(snapshot().pagination.pending).toBeNull();
+    expect(pagination.selectFreshness(snapshot(), 'a')).toBe('stale');
   });
 
   test('does not expose failed or superseded generated results as successful pages', async () => {

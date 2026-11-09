@@ -192,8 +192,68 @@ and domain reducers plus API reducer composition in `trackerApiReducers.ts`.
 The app, not the API definition, owns initial domain state. API creation installs
 nothing in a store; execution fails explicitly if the generated reducer is
 omitted and its started action cannot claim ownership.
-Duplicate pending queries share the original execution and outcome;
+Duplicate pending queries in the same invalidation generation share the original execution and outcome;
 duplicate pending mutations still return a skipped outcome.
+
+### Query invalidation
+
+Each toolkit independently exports `createInvalidationRegistry`, typed tags,
+and registry state and actions. Define one registry per store composition and
+initialize its state with `{ revision: 0, queries: {}, history: [] }`. Install
+its reducer before the domain and generated API reducers. The registry
+definition may be shared by multiple APIs, but its data belongs to each store.
+
+```ts
+const registry = createInvalidationRegistry<AppState, 'TaskList' | 'Task'>()({
+  name: 'tracker',
+  getState: (state) => state.invalidation,
+  setState: (state, invalidation) => ({ ...state, invalidation }),
+});
+```
+
+Queries declare `provides: { registry, fromVariables, fromResult }`. Standalone
+lifecycles and generated mutations declare
+`invalidation: { registry, tags: (input, result) => ... }`. Tags match exactly:
+`{ type: 'TaskList' }` and `{ type: 'Task', id: '42' }` are independent.
+The tracker explicitly invalidates both for task writes, and invalidates the
+person entity for renames. Mixed-mode task pages also depend on their assignee
+IDs. Confirmation and invalidation are published in one reducer transition.
+Use the toolkit's guarded success/confirmation reducers and registry-first
+composition; arbitrary custom confirmation handlers must enforce the same
+receipt and ownership rules. Missing registration or unsafe ordering fails
+explicitly. A successful server mutation followed by decode, normalization,
+tag or publication failure raises `PostCommitError`, not an ordinary rejected
+write; reconcile uncertain local state rather than blindly retrying.
+
+`registry.invalidate({ store, tags })` returns an Effect with the number of
+known matching query identities. Even zero matches advance the revision so an
+in-flight result can reveal a later matching entity. `registry.actions.forget`
+removes one identity's metadata without deleting domain data. Pending reads
+remain fenced across forget and re-registration. The registry retains
+registered metadata until explicitly forgotten; it does not evict, fetch, or
+refetch.
+
+Generated query `selectFreshness(state, variables)` and pagination
+`selectFreshness(state, identity)` return `uninitialized`, `fresh` or `stale`.
+The optional `useQuery` hook exposes the same ordinary-query freshness in its
+existing subscription and requires `provides`. Invalidation keeps visible
+entities and cursor state. Matching reads started earlier are superseded,
+including dependencies discovered in their result; unrelated invalidations do
+not reject them. Any invalidation starts a new query-sharing generation.
+
+Pagination uses the app's canonical chain identity without the cursor. Pass the
+chain request's identity and request ID as the generated query's `fence`, using
+`pagination.key(request.identity)`. Configure `fromIdentity` and `fromPage`
+on the pagination definition and use the same registry for both. Query
+`fromResult` and pagination `fromPage` must describe the same page dependencies.
+Fenced page-query registrations are transient; retained freshness belongs to
+the chain rather than individual cursors. Append
+accumulates tags; successful first-page replacement replaces them. A stale
+chain blocks `next` until an eligible refresh or replacement succeeds.
+`cursorChainKey` supplies the same identity for explicit SSR seeding. Both
+tracker apps seed their hydrated chain and retain their existing explicit
+post-write refreshes; injected status and priority persistence still does not
+refresh automatically.
 
 CRUD writes and people reads instead use standalone
 `createRequestLifecycle<State, Result>()(prefix, { pending })` definitions.
@@ -202,6 +262,12 @@ an Effect-valued runner, but installs no reducers and requires no `state.api`
 metadata. Each run takes `store`, `input` and an abort-aware `execute(signal)`
 returning only saved domain data. The runner constructs request IDs and failure
 messages.
+
+After successful execution, the runner verifies that confirmation released the
+claimed pending request. If confirmation is not applied or publication throws,
+it raises `PostCommitError` instead of publishing an ordinary failure or
+rolling back. The server operation succeeded, but local settlement may or may
+not have committed; callers should reconcile rather than blindly retry a write.
 
 State and saved-result types are declared once when defining the lifecycle.
 Input is inferred from the pending accessor, and pending records from its return

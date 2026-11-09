@@ -27,6 +27,8 @@ import {
   trackerActions
 } from './store';
 import { ReduxStore } from './reduxStore';
+import { taskPagination } from './trackerApiReducers';
+import { trackerInvalidation } from './trackerInvalidation';
 
 import { createTrackerDatabase } from '@repo/project-tracker/database';
 import { createLocalActions } from '@repo/project-tracker';
@@ -84,6 +86,82 @@ afterEach(async () => {
 });
 
 describe('Redux project tracker', () => {
+  test('invalidates the hydrated task chain after an injected status save without refreshing', async () => {
+    // Arrange: the initial task page is explicitly seeded fresh.
+    const store = createAppStore();
+    const identity = store.getState().pagination.identity;
+    const persist = vi.fn(async ({ taskId, value }: FieldWrite<TaskStatus>) => ({ taskId, value }));
+
+    expect(taskPagination.selectFreshness(store.getState(), identity)).toBe('fresh');
+
+    // Act: save a task through the injected persistence callback.
+    await store.dispatch(saveStatus({ taskId: 'ATL-01', value: 'done', persist }));
+
+    // Assert: the chain is stale without an automatic refresh.
+    expect(taskPagination.selectFreshness(store.getState(), identity)).toBe('stale');
+    expect(store.getState().tasks['ATL-01']?.status).toBe('done');
+    expect(persist).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test('discards a page whose newly discovered task was invalidated while loading', async () => {
+    // Arrange: keep a generated page request pending.
+    const store = createAppStore();
+    const before = store.getState();
+    let finish: (page: TaskPage) => void = () => { throw new Error('Page did not start.'); };
+    let markStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const read = store.dispatch(loadMoreTasks({
+      fetchPage: () => new Promise<TaskPage>((resolve) => {
+        finish = resolve;
+        markStarted();
+      }),
+    }));
+    await started;
+
+    // Act: invalidate an entity that is only known when the page arrives.
+    store.dispatch(trackerInvalidation.actions.invalidate({ tags: [{ type: 'Task', id: 'new-task' }] }));
+    finish({
+      projects: [],
+      people: [],
+      tasks: [{ id: 'new-task', projectId: 'atlas', assigneeId: null, title: 'Old', status: 'todo', priority: 'low' }],
+      pageInfo: { endCursor: 'next', hasNextPage: true },
+      totalCount: 1,
+      statusCounts: [],
+    });
+    await read;
+
+    // Assert: the old window remains visible and the chain requires refresh.
+    const after = store.getState();
+    expect(after.tasks['new-task']).toBeUndefined();
+    expect(after.result).toEqual(before.result);
+    expect(after.pagination.cursor).toBe(before.pagination.cursor);
+    expect(after.request.status).toBe('idle');
+    expect(taskPagination.selectFreshness(after, before.pagination.identity)).toBe('stale');
+    expect(Object.values(after.api.requests).some((request) => request.status === 'superseded')).toBe(true);
+  });
+
+  test.each(['rest', 'mixed'] satisfies readonly TrackerSourceMode[])(
+    'invalidates the %s task chain when an assigned person is renamed',
+    async (sourceMode) => {
+      // Arrange: load the current source mode and its assigned people.
+      const store = createAppStore();
+      await store.dispatch(selectSourceMode(sourceMode));
+      const identity = store.getState().pagination.identity;
+      const requestsBeforeRename = vi.mocked(fetch).mock.calls.length;
+
+      expect(taskPagination.selectFreshness(store.getState(), identity)).toBe('fresh');
+
+      // Act: rename a person without refreshing task pages.
+      await store.dispatch(renamePerson({ personId: 'mara', name: 'Mara Sato' }));
+
+      // Assert: the visible chain is stale across transport modes.
+      expect(store.getState().people.mara?.name).toBe('Mara Sato');
+      expect(taskPagination.selectFreshness(store.getState(), identity)).toBe('stale');
+      expect(vi.mocked(fetch).mock.calls.length).toBe(requestsBeforeRename + 1);
+    },
+  );
+
   describe.each(['graphql', 'rest', 'mixed'] satisfies readonly TrackerSourceMode[])('domain validation in %s mode', (sourceMode) => {
     test.each([
       {
@@ -442,7 +520,7 @@ describe('Redux project tracker', () => {
       after: null,
       query: expect.objectContaining({ projectId: 'atlas', status: 'done' }),
     }));
-    expect(store.getState()).toBe(current);
+    expect({ ...store.getState(), invalidation: current.invalidation }).toEqual(current);
     expect(store.getState().request.status).toBe('complete');
   });
 
@@ -479,7 +557,7 @@ describe('Redux project tracker', () => {
     await old;
 
     // Assert: stale pages cannot alter either entities or cursor ownership.
-    expect(store.getState()).toBe(current);
+    expect({ ...store.getState(), invalidation: current.invalidation }).toEqual(current);
     expect(store.getState().result.query.search).toBe('new query');
     expect(store.getState().result.totalCount).toBe(0);
   });

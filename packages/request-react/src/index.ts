@@ -1,5 +1,5 @@
 import { Effect } from 'effect';
-import { useCallback, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 
 export type RequestStatus =
   | { readonly status: 'idle' }
@@ -35,10 +35,20 @@ type HookOptions<State, Input extends RequestInput> = {
   readonly input: Input;
 };
 
+export type QueryFreshness = 'uninitialized' | 'fresh' | 'stale';
+
+type QueryHookOptions<State, Input extends RequestInput> = Omit<HookOptions<State, Input>, 'operation'> & {
+  readonly operation: Operation<State, Input> & {
+    readonly selectFreshness: (state: State, variables: Input['variables']) => QueryFreshness;
+  };
+};
+
 type HookResult = {
   readonly request: RequestStatus;
   readonly trigger: () => Promise<RequestOutcome>;
 };
+
+type QueryHookResult = HookResult & { readonly freshness: QueryFreshness };
 
 const idle: RequestStatus = { status: 'idle' };
 
@@ -61,9 +71,32 @@ function useRequest<State, Input extends RequestInput>(
 
 /** Observe and manually trigger a query for the supplied variables. */
 export function useQuery<State, Input extends RequestInput>(
-  options: HookOptions<State, Input>,
-): HookResult {
-  return useRequest('query', options);
+  options: QueryHookOptions<State, Input>,
+): QueryHookResult {
+  const { operation, source, input } = options;
+  if (operation.kind !== 'query')
+    throw new Error('Expected a query operation.');
+
+  const getQuerySnapshot = useMemo(() => {
+    let previous: { readonly request: RequestStatus; readonly freshness: QueryFreshness } | undefined;
+
+    return () => {
+      const state = source.getSnapshot();
+      const request = operation.selectRequest(state, input.variables) ?? idle;
+      const freshness = operation.selectFreshness(state, input.variables);
+
+      if (!previous || previous.request !== request || previous.freshness !== freshness)
+        previous = { request, freshness };
+
+      return previous;
+    };
+  },
+    [operation, source, input.variables],
+  );
+  const { request, freshness } = useSyncExternalStore(source.subscribe, getQuerySnapshot, getQuerySnapshot);
+  const trigger = useCallback(() => Effect.runPromise(operation.run(input)), [operation, input]);
+
+  return { request, freshness, trigger };
 }
 
 /** Observe and manually trigger a mutation for the supplied variables. */

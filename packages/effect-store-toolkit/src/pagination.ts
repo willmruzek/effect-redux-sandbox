@@ -3,6 +3,17 @@ import { produce, type Draft } from 'immer';
 
 import { validateCursorPage } from './cursor.js';
 import type { RequestOutcome, RequestResult } from './engine.js';
+import type {
+  InvalidationTag,
+  QueryInvalidationRegistry,
+} from './invalidation.js';
+
+export type PaginationOutcome = RequestOutcome | { readonly status: 'stale' };
+
+/** Returns the registry identity for a cursor chain. */
+export function cursorChainKey(name: string, identity: string): string {
+  return JSON.stringify([name, identity]);
+}
 
 export type PaginationRequest<Cursor> = {
   readonly requestId: string;
@@ -25,18 +36,23 @@ export type PaginationAction<Cursor, Page> =
   | { readonly type: string; readonly kind: 'failed'; readonly request: PaginationRequest<Cursor>; readonly message: string }
   | { readonly type: string; readonly kind: 'abandoned'; readonly request: PaginationRequest<Cursor> };
 
-type PaginationOptions<State, Cursor, Page> = {
+type PaginationOptions<State, Cursor, Page, Name extends string, Action> = {
   readonly name: string;
   readonly getState: (state: State) => CursorPaginationState<Cursor>;
   readonly setState: (state: Draft<State>, pagination: CursorPaginationState<Cursor>) => void;
   readonly pageInfo: (page: Page) => { readonly cursor: Cursor | null; readonly hasNextPage: boolean };
   readonly merge: (state: Draft<State>, page: Page, request: PaginationRequest<Cursor>) => void;
+  readonly invalidation?: {
+    readonly registry: QueryInvalidationRegistry<State, Name, Action>;
+    readonly fromIdentity: (identity: string) => readonly InvalidationTag<Name>[];
+    readonly fromPage: (page: Page, request: PaginationRequest<Cursor>) => readonly InvalidationTag<Name>[];
+  };
 };
 
-type RunInput<State, Cursor, Page> = {
+type RunInput<State, Cursor, Page, Action = never> = {
   readonly store: {
     readonly getState: Effect.Effect<State>;
-    readonly dispatch: (action: PaginationAction<Cursor, Page>) => Effect.Effect<unknown>;
+    readonly dispatch: (action: PaginationAction<Cursor, Page> | Action) => Effect.Effect<unknown>;
   };
   readonly identity: string;
   readonly restart?: boolean;
@@ -52,8 +68,12 @@ type RunInput<State, Cursor, Page> = {
 
 /** Define a single store-owned cursor chain without installing its reducer. */
 export function createCursorPagination<State, Cursor, Page>() {
-  return function define(options: PaginationOptions<State, Cursor, Page>) {
+  return function define<const Name extends string = never, Action = never>(
+    options: PaginationOptions<State, Cursor, Page, Name, Action>,
+  ) {
     const type = `${options.name}/pagination`;
+    const invalidation = options.invalidation;
+    const key = (identity: string): string => cursorChainKey(options.name, identity);
 
     function reducer(state: State, action: { readonly type: string }): State {
       function matches(value: { readonly type: string }): value is PaginationAction<Cursor, Page> {
@@ -66,6 +86,13 @@ export function createCursorPagination<State, Cursor, Page>() {
       const current = options.getState(state);
 
       if (action.kind !== 'started' && current.pending?.requestId !== action.request.requestId)
+        return state;
+
+      if (action.kind === 'succeeded' && invalidation && !invalidation.registry.isEligible(state, {
+        identity: key(action.request.identity),
+        requestId: action.request.requestId,
+        tags: invalidation.fromPage(action.page, action.request),
+      }))
         return state;
 
       return produce(state, (draft) => {
@@ -102,10 +129,21 @@ export function createCursorPagination<State, Cursor, Page>() {
     }
 
     const run = Effect.fnUntraced(function*(
-      input: RunInput<State, Cursor, Page>,
+      input: RunInput<State, Cursor, Page, Action>,
       mode: 'next' | 'refresh',
-    ): Effect.fn.Return<RequestOutcome, Error> {
+    ): Effect.fn.Return<PaginationOutcome, Error> {
+      if (invalidation)
+        yield* invalidation.registry.ensureInstalled({ store: input.store });
+
       const current = options.getState(yield* input.store.getState);
+
+      if (
+        mode === 'next' &&
+        !input.restart &&
+        current.identity === input.identity &&
+        invalidation?.registry.select(yield* input.store.getState, key(input.identity)) === 'stale'
+      )
+        return { status: 'stale' };
 
       if (mode === 'next' && current.pending?.identity === input.identity)
         return { status: 'skipped' };
@@ -134,12 +172,28 @@ export function createCursorPagination<State, Cursor, Page>() {
         after,
         mode: actualMode,
       };
+      let registered = false;
 
-      const perform = Effect.fnUntraced(function*(): Effect.fn.Return<RequestOutcome, Error> {
+      const perform = Effect.fnUntraced(function*(): Effect.fn.Return<PaginationOutcome, Error> {
         yield* input.store.dispatch({ type, kind: 'started', request });
 
         if (options.getState(yield* input.store.getState).pending?.requestId !== request.requestId)
           return yield* Effect.fail(new Error(`Could not claim ${options.name} pagination request.`));
+
+        if (invalidation) {
+          registered = true;
+          yield* input.store.dispatch(invalidation.registry.actions.started({
+            identity: key(request.identity),
+            requestId: request.requestId,
+            tags: invalidation.fromIdentity(request.identity),
+          }));
+
+          if (!invalidation.registry.hasPending(yield* input.store.getState, {
+            identity: key(request.identity),
+            requestId: request.requestId,
+          }))
+            return yield* Effect.fail(new Error(`Could not register ${options.name} pagination dependencies.`));
+        }
 
         const execution = 'query' in input
           ? input.query(after, request)
@@ -182,6 +236,21 @@ export function createCursorPagination<State, Cursor, Page>() {
           return { status: 'failed', error: validated.failure.message };
         }
 
+        if (invalidation && !invalidation.registry.isEligible(yield* input.store.getState, {
+          identity: key(request.identity),
+          requestId: request.requestId,
+          tags: invalidation.fromPage(page, request),
+        })) {
+          yield* input.store.dispatch(invalidation.registry.actions.succeeded({
+            identity: key(request.identity),
+            requestId: request.requestId,
+            tags: invalidation.fromPage(page, request),
+            append: request.after !== null,
+          }));
+          yield* input.store.dispatch({ type, kind: 'abandoned', request });
+          return { status: 'superseded' };
+        }
+
         yield* input.store.dispatch({
           type,
           kind: 'succeeded',
@@ -190,22 +259,64 @@ export function createCursorPagination<State, Cursor, Page>() {
           cursor: validated.success.cursor,
           exhausted: !validated.success.hasNextPage,
         });
+
+        if (invalidation) {
+          const currentState = yield* input.store.getState;
+          const eligible = invalidation.registry.isEligible(currentState, {
+            identity: key(request.identity),
+            requestId: request.requestId,
+            tags: invalidation.fromPage(page, request),
+          });
+          const pending = options.getState(currentState).pending?.requestId === request.requestId;
+
+          yield* input.store.dispatch(invalidation.registry.actions.succeeded({
+            identity: key(request.identity),
+            requestId: request.requestId,
+            tags: invalidation.fromPage(page, request),
+            append: request.after !== null,
+          }));
+
+          if (pending) {
+            yield* input.store.dispatch({ type, kind: 'abandoned', request });
+
+            if (eligible)
+              return yield* Effect.fail(new Error(`Could not settle ${options.name} pagination request.`));
+
+            return { status: 'superseded' };
+          }
+        }
+
         return { status: 'succeeded' };
       });
 
-      return yield* perform().pipe(Effect.onError((cause) =>
-        input.store.dispatch({
-          type,
-          kind: 'failed',
-          request,
-          message: Cause.hasInterruptsOnly(cause) ? 'Request interrupted.' : Cause.pretty(cause),
-        }).pipe(Effect.asVoid)));
+      return yield* perform().pipe(
+        Effect.onError((cause) =>
+          input.store.dispatch({
+            type,
+            kind: 'failed',
+            request,
+            message: Cause.hasInterruptsOnly(cause) ? 'Request interrupted.' : Cause.pretty(cause),
+          }).pipe(Effect.asVoid)),
+        Effect.ensuring(Effect.suspend(() => invalidation && registered
+          ? input.store.dispatch(invalidation.registry.actions.finished({
+            identity: key(request.identity),
+            requestId: request.requestId,
+          })).pipe(Effect.asVoid)
+          : Effect.void)),
+      );
     });
 
     return {
       reducer,
-      next: (input: RunInput<State, Cursor, Page>) => run(input, 'next'),
-      refresh: (input: RunInput<State, Cursor, Page>) => run(input, 'refresh'),
+      key,
+      selectFreshness: (state: State, identity: string) => {
+        if (!invalidation)
+          throw new Error(`Pagination ${options.name} has no invalidation dependencies.`);
+
+        return invalidation.registry.select(state, key(identity));
+      },
+      next: (input: RunInput<State, Cursor, Page, Action>) => run(input, 'next'),
+      refresh: (input: RunInput<State, Cursor, Page, Action>) => run(input, 'refresh'),
     };
   };
 }

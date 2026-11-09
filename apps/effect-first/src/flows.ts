@@ -80,6 +80,7 @@ export const loadMoreTasks = Effect.fn('loadMoreTasks')(function*(options: LoadO
     query: (after, request) => trackerApi.operations.tasks.runWithResult({
       variables: { mode: request.mode === 'refresh' ? 'refresh' : 'page', query, after, fail: options.fail ?? false, sourceMode },
       store,
+      fence: { identity: taskPagination.key(request.identity), requestId: request.requestId },
       ...(fetchPage ? { execute: async (variables) => ({
         page: await fetchPage(request.mode === 'refresh'
           ? { after: variables.after, query: variables.query, fail: variables.fail }
@@ -107,9 +108,10 @@ export const refreshTasks = Effect.fn('refreshTasks')(function*(options: Refresh
   yield* taskPagination.refresh({
     store,
     identity: variablesKey({ query, sourceMode }),
-    query: (after) => trackerApi.operations.tasks.runWithResult({
+    query: (after, request) => trackerApi.operations.tasks.runWithResult({
       variables: { mode: 'refresh', query, after, fail: options.fail ?? false, sourceMode },
       store,
+      fence: { identity: taskPagination.key(request.identity), requestId: request.requestId },
       ...(fetchPage ? {
         execute: async (variables) => ({
           page: await fetchPage({ after: variables.after, query: variables.query, fail: variables.fail }),

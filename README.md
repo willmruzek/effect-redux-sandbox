@@ -43,9 +43,9 @@ traces and runnable public-API examples.
 | Endpoint response cache | ✅ QueryClient cache | ✅ Redux API cache | 🧭 N/A — normalized entities live in app-owned store state instead |
 | Request identity | ✅ Query key | ✅ Endpoint and arguments | ✅ Canonical request keys and app-defined scopes |
 | Duplicate pending reads | ✅ Deduplicated | ✅ Cached/shared for matching endpoint arguments | ✅ Shared execution/outcome per operation, store service and canonical key |
-| Freshness and cache lifetime | ✅ Configurable | ✅ Subscription-based lifetime and refetch options | 📋 Planned — library-owned freshness and retention policies |
+| Freshness and cache lifetime | ✅ Configurable | ✅ Subscription-based lifetime and refetch options | 🟡 Explicit invalidation freshness; retention policies planned |
 | Background refetch | ✅ Configurable refetch policies | ✅ Configurable refetch behavior | 📋 Planned — currently explicit app refresh |
-| Mutation invalidation | ✅ Query invalidation | ✅ Tag invalidation | 📋 Planned — currently apps choose whether to refresh |
+| Mutation invalidation | ✅ Query invalidation | ✅ Tag invalidation | ✅ Typed tag invalidation; refresh remains explicit |
 | Optimistic writes | ✅ | ✅ | ✅ Optional field reducers; apps define transitions |
 | Failure rollback | ✅ | ✅ | ✅ Field helper restores the original value and records an error |
 | Stale-settlement protection | ✅ | ✅ | ✅ Explicit request ownership and latest-wins guards |
@@ -79,9 +79,11 @@ this roadmap does not require an endpoint response cache.
   policies for normalized query membership/metadata, with explicit entity
   retention and eviction ownership.
 - [ ] **Background refetch:** add library-owned scheduling and configurable
-  triggers, with defined active-query ownership and cancellation.
-- [ ] **Mutation invalidation:** let mutations declare affected query scopes and
-  let the library mark them stale/refetch according to the configured policy.
+  triggers, with defined active-query ownership and cancellation. See
+  [plan 0012](plans/0012-query-refetch.md).
+- [x] **Mutation invalidation:** let mutations declare affected tags and mark
+  dependent queries stale; refresh remains explicit.
+  See [plan 0011](plans/0011-query-mutation-invalidation.md).
 - [x] **Manual request hooks:** expose generated query and mutation triggers,
   status and errors without requiring React components to inspect store
   metadata. Subscriptions do not automatically start requests; see

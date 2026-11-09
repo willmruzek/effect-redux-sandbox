@@ -3,6 +3,7 @@ import {
   type PayloadAction,
   type SliceActions,
   type RequestActions,
+  type InvalidationAction,
   type PaginationAction
 } from '@repo/effect-store-toolkit';
 import {
@@ -27,6 +28,7 @@ import {
 } from './trackerOperations';
 import { trackerApiReducer } from './trackerApiReducers';
 import { trackerOperationReducer } from './trackerOperationReducers';
+import { trackerInvalidation, type TrackerTag } from './trackerInvalidation';
 
 const tracker = createSlice({
   name: 'tracker',
@@ -132,7 +134,8 @@ export function rootReducer(input: Readonly<{
   state: RootState;
   action: StoreAction
 }>): RootState {
-  const readState = trackerApiReducer(input);
+  const invalidationState = trackerInvalidation.reducer(input.state, input.action);
+  const readState = trackerApiReducer({ state: invalidationState, action: input.action });
   const operationState = trackerOperationReducer({ state: readState, action: input.action });
 
   const next = tracker.reducer({ state: operationState, action: input.action });
@@ -146,6 +149,7 @@ export type RootState = TrackerApiState;
 
 export type StoreAction =
   | LocalAction
+  | InvalidationAction<TrackerTag>
   | PaginationAction<string, NormalizedTaskPage>
   | SliceActions<typeof trackerActions>
   | RequestActions<typeof trackerApi.operations>

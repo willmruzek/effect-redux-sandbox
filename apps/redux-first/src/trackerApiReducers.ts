@@ -2,13 +2,15 @@ import {
   receiveNormalizedTaskPage,
   type NormalizedTaskPage
 } from '@repo/project-tracker';
-import { createCursorPagination } from '@repo/redux-toolkit';
+import { variablesKey } from '@repo/gql-api';
+import { createCursorPagination, type PaginationAction } from '@repo/redux-toolkit';
 
 import { trackerApi } from './api';
 import {
   createTrackerApiState,
   type TrackerApiState,
 } from './trackerApiDefinition';
+import { taskPageTags, trackerInvalidation } from './trackerInvalidation';
 
 const tasks = trackerApi.operations.tasks.reducer({
   onStarted: (state, { requestId, variables }) => {
@@ -51,6 +53,11 @@ const tasks = trackerApi.operations.tasks.reducer({
 
 export const taskPagination = createCursorPagination<TrackerApiState, string, NormalizedTaskPage>()({
   name: 'trackerTasks',
+  invalidation: {
+    registry: trackerInvalidation,
+    fromIdentity: () => [{ type: 'TaskList' }],
+    fromPage: taskPageTags,
+  },
   getState: (state) => state.pagination,
   setState: (state, pagination) => {
     state.pagination = pagination;
@@ -71,5 +78,23 @@ export function trackerApiReducer(
   state: TrackerApiState = createTrackerApiState(),
   action: { readonly type: string },
 ): TrackerApiState {
-  return taskPagination.reducer(trackerApi.reducer(tasks(state, action), action), action);
+  const next = taskPagination.reducer(trackerApi.reducer(tasks(state, action), action), action);
+
+  function isAbandoned(value: { readonly type: string }): value is Extract<
+    PaginationAction<string, NormalizedTaskPage>, { readonly kind: 'abandoned' }
+  > {
+    return value.type === 'trackerTasks/pagination' && 'kind' in value && value.kind === 'abandoned';
+  }
+
+  if (
+    isAbandoned(action) &&
+    state.pagination.pending?.requestId === action.request.requestId &&
+    (state.request.status === 'loading' || state.request.status === 'refreshing') &&
+    variablesKey({ query: state.request.query, sourceMode: state.request.sourceMode }) === action.request.identity &&
+    state.request.after === action.request.after
+  ) {
+    return { ...next, request: { status: state.pagination.exhausted ? 'complete' : 'idle' } };
+  }
+
+  return next;
 }

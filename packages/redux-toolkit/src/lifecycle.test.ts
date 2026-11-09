@@ -13,6 +13,7 @@ import { createSlice } from '@reduxjs/toolkit';
 
 import {
   createRequestLifecycle,
+  PostCommitError,
   type RequestActions,
 } from './index.js';
 
@@ -431,5 +432,68 @@ describe('request lifecycle', () => {
     expect(snapshot().pending.a).toBeUndefined();
     expect(snapshot().values.a).toBe('original');
     expect(snapshot().errors.a).toContain('Publication failed');
+  });
+
+  test.each(['before', 'after'])(
+    'reports a post-commit error when confirmation publication fails %s reduction',
+    async (timing) => {
+      // Arrange: the server succeeds, but confirmation publication fails.
+      const { edit, store, actions, snapshot } = setup();
+      const failingStore = {
+        getState: store.getState,
+        dispatch: (action: RequestActions<{ edit: typeof edit }>) => Effect.gen(function*() {
+          if (action.type === edit.actions.confirmed.type && timing === 'before')
+            return yield* Effect.die(new Error('Confirmation publication failed'));
+
+          yield* store.dispatch(action);
+
+          if (action.type === edit.actions.confirmed.type && timing === 'after')
+            return yield* Effect.die(new Error('Confirmation publication failed'));
+        }),
+      };
+
+      // Act: publish the server's successful result.
+      const result = await Effect.runPromise(Effect.result(edit.run({
+        store: failingStore,
+        input: { id: 'a', value: 'optimistic' },
+        execute: async () => 'saved',
+      })));
+
+      // Assert: the failure identifies server success without a rollback action.
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') {
+        expect(result.failure).toBeInstanceOf(PostCommitError);
+        expect(result.failure.message).toContain('Confirmation publication failed');
+      }
+      expect(actions).not.toContain(edit.actions.failed.type);
+      expect(snapshot().errors.a).toBeUndefined();
+      expect(snapshot().values.a).toBe(timing === 'before' ? 'optimistic' : 'saved');
+    },
+  );
+
+  test('reports a post-commit error when the confirmation reducer is not installed', async () => {
+    // Arrange: the start reducer is installed, but confirmation is ignored.
+    const { edit, store, actions, snapshot } = setup();
+    const incompleteStore = {
+      getState: store.getState,
+      dispatch: (action: RequestActions<{ edit: typeof edit }>) =>
+        action.type === edit.actions.confirmed.type ? Effect.void : store.dispatch(action),
+    };
+
+    // Act: the server succeeds but the store does not settle the claimed write.
+    const result = await Effect.runPromise(Effect.result(edit.run({
+      store: incompleteStore,
+      input: { id: 'a', value: 'optimistic' },
+      execute: async () => 'saved',
+    })));
+
+    // Assert: local confirmation is not reported as successful or rolled back.
+    expect(result._tag).toBe('Failure');
+    if (result._tag === 'Failure') {
+      expect(result.failure).toBeInstanceOf(PostCommitError);
+      expect(result.failure.message).toContain('Could not confirm writes/edit request.');
+    }
+    expect(actions).not.toContain(edit.actions.failed.type);
+    expect(snapshot().pending.a).toBeDefined();
   });
 });

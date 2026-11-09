@@ -4,10 +4,16 @@ import { configureStore } from '@reduxjs/toolkit';
 import { createStore, type StoreService } from '@repo/effect-store';
 import {
   createRequestApi as createEffectApi,
+  createInvalidationRegistry as createEffectInvalidationRegistry,
+  type InvalidationAction as EffectInvalidationAction,
   type RequestActions as EffectRequestActions,
 } from '@repo/effect-store-toolkit';
 import {
   createRequestApi as createReduxApi,
+  createInvalidationRegistry as createReduxInvalidationRegistry,
+  type InvalidationAction as ReduxInvalidationAction,
+  type InvalidationState,
+  type InvalidationTag,
   type RequestActions as ReduxRequestActions,
 } from '@repo/redux-toolkit';
 import { Context, Effect, Fiber, Layer, ManagedRuntime } from 'effect';
@@ -19,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, test, vi } from 
 import { useMutation, useQuery } from '@repo/request-react';
 
 type State = {
+  readonly invalidation: InvalidationState<'Item'>;
   readonly api: {
     readonly requests: Readonly<Record<string, {
       readonly status: 'pending' | 'succeeded' | 'superseded';
@@ -37,7 +44,10 @@ type State = {
 
 type Variables = { readonly id: string };
 
-const initialState = (): State => ({ api: { requests: {}, latest: {} } });
+const initialState = (): State => ({
+  api: { requests: {}, latest: {} },
+  invalidation: { revision: 0, queries: {}, history: [] },
+});
 
 const definition = {
   decode: (_data: unknown, variables: Variables) => variables.id,
@@ -56,19 +66,33 @@ function deferred() {
 }
 
 function reduxSetup() {
+  const registry = createReduxInvalidationRegistry<State, 'Item'>()({
+    name: 'test',
+    getState: (state) => state.invalidation,
+    setState: (state, invalidation) => ({ ...state, invalidation }),
+  });
   const api = createReduxApi({
     name: 'test',
     state: (state) => state.api,
     getState: (state: State) => state.api,
     operations: (builder) => ({
-      query: builder.query('query', { ...definition, scope: () => 'selection' }),
+      query: builder.query('query', {
+        ...definition,
+        scope: () => 'selection',
+        provides: {
+          registry,
+          fromVariables: (variables: Variables): readonly InvalidationTag<'Item'>[] =>
+            [{ type: 'Item', id: variables.id }],
+          fromResult: () => [],
+        },
+      }),
       mutation: builder.mutation('mutation', definition),
     }),
   });
   const redux = configureStore({
-    reducer: (state: State = initialState(), action) => api.reducer(state, action),
+    reducer: (state: State = initialState(), action) => api.reducer(registry.reducer(state, action), action),
   });
-  type Action = ReduxRequestActions<typeof api.operations>;
+  type Action = ReduxRequestActions<typeof api.operations> | ReduxInvalidationAction<'Item'>;
   const service = {
     getState: Effect.sync(redux.getState),
     dispatch: (action: Action) => Effect.sync(() => redux.dispatch(action)),
@@ -76,6 +100,7 @@ function reduxSetup() {
 
   return {
     api,
+    registry,
     source: { subscribe: redux.subscribe, getSnapshot: redux.getState },
     service,
     dispose: async () => {},
@@ -83,16 +108,30 @@ function reduxSetup() {
 }
 
 function effectSetup() {
+  const registry = createEffectInvalidationRegistry<State, 'Item'>()({
+    name: 'test',
+    getState: (state) => state.invalidation,
+    setState: (state, invalidation) => ({ ...state, invalidation }),
+  });
   const api = createEffectApi({
     name: 'test',
     state: (state) => state.api,
     getState: (state: State) => state.api,
     operations: (builder) => ({
-      query: builder.query('query', { ...definition, scope: () => 'selection' }),
+      query: builder.query('query', {
+        ...definition,
+        scope: () => 'selection',
+        provides: {
+          registry,
+          fromVariables: (variables: Variables): readonly InvalidationTag<'Item'>[] =>
+            [{ type: 'Item', id: variables.id }],
+          fromResult: () => [],
+        },
+      }),
       mutation: builder.mutation('mutation', definition),
     }),
   });
-  type Action = EffectRequestActions<typeof api.operations>;
+  type Action = EffectRequestActions<typeof api.operations> | EffectInvalidationAction<'Item'>;
 
   class TestStore extends Context.Service<TestStore, StoreService<State, Action, TestStore>>()('test/store') {}
 
@@ -101,14 +140,14 @@ function effectSetup() {
     service: TestStore,
     runtime,
     initialState: initialState(),
-    reducer: ({ state, action }) => api.reducer(state, action),
+    reducer: ({ state, action }) => api.reducer(registry.reducer(state, action), action),
   });
   const service = {
     getState: Effect.sync(store.getSnapshot),
     dispatch: (action: Action) => Effect.sync(() => store.dispatch(action)),
   };
 
-  return { api, source: store, service, dispose: () => runtime.dispose() };
+  return { api, registry, source: store, service, dispose: () => runtime.dispose() };
 }
 
 describe.each([
@@ -129,6 +168,47 @@ describe.each([
     await act(async () => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
+  });
+
+  test('useQuery observes freshness without starting a fetch', async () => {
+    // Arrange: observe an uninitialized query with a manually controlled transport.
+    const app = setup();
+    const execute = vi.fn(async (variables: Variables) => variables.id);
+
+    function Consumer() {
+      const { freshness } = useQuery({
+        operation: app.api.operations.query,
+        source: app.source,
+        input: { store: app.service, variables: { id: 'a' }, execute },
+      });
+
+      return <p>{freshness}</p>;
+    }
+
+    await act(async () => root.render(<Consumer />));
+    expect(container.textContent).toBe('uninitialized');
+    expect(execute).not.toHaveBeenCalled();
+
+    // Act: complete the query and invalidate its registered dependency.
+    await act(async () => {
+      await Effect.runPromise(app.api.operations.query.run({
+        store: app.service,
+        variables: { id: 'a' },
+        execute,
+      }));
+    });
+    expect(container.textContent).toBe('fresh');
+    await act(async () => {
+      await Effect.runPromise(app.registry.invalidate({
+        store: app.service,
+        tags: [{ type: 'Item', id: 'a' }],
+      }));
+    });
+
+    // Assert: invalidation updates the hook without fetching again.
+    expect(container.textContent).toBe('stale');
+    expect(execute).toHaveBeenCalledTimes(1);
+    await app.dispose();
   });
 
   test('useQuery remains idle until manually triggered', async () => {
@@ -450,12 +530,13 @@ describe.each([
   });
 
   test('useQuery rejects when the receiving service cannot claim a request', async () => {
-    // Arrange: provide a service that does not publish request actions.
+    // Arrange: install the registry but do not publish request actions.
     const app = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
     const service = {
       getState: Effect.sync(app.source.getSnapshot),
-      dispatch: () => Effect.void,
+      dispatch: (action: Parameters<typeof app.service.dispatch>[0]) =>
+        'kind' in action ? app.service.dispatch(action) : Effect.void,
     };
     let trigger: () => Promise<unknown> = async () => {
       throw new Error('Not mounted');

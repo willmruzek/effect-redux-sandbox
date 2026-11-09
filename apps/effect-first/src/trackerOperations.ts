@@ -11,6 +11,7 @@ import type {
   TaskStatus
 } from '@repo/project-tracker';
 import type { TrackerApiState } from './trackerApiDefinition';
+import { taskTags, trackerInvalidation } from './trackerInvalidation';
 
 export const trackerOperations = {
   peopleRequest: createRequestLifecycle<TrackerApiState, readonly Person[]>()('tracker/peopleRequest', {
@@ -20,6 +21,12 @@ export const trackerOperations = {
   }),
 
   taskDetailWrite: createRequestLifecycle<TrackerApiState, Task>()('tracker/taskDetailWrite', {
+    invalidation: {
+      registry: trackerInvalidation,
+      tags: (input: TaskDetailWriteInput, result: Task) => [
+        ...taskTags(input.taskId), { type: 'Task', id: result.id },
+      ],
+    },
     pending: (state, payload: TaskDetailWriteInput) => {
       const pending = state.detailWrites[payload.taskId];
 
@@ -28,6 +35,10 @@ export const trackerOperations = {
   }),
 
   deletion: createRequestLifecycle<TrackerApiState, string>()('tracker/deletion', {
+    invalidation: {
+      registry: trackerInvalidation,
+      tags: (input: TaskDeletionInput) => taskTags(input.taskId),
+    },
     pending: (state, payload: TaskDeletionInput) => {
       const pending = state.deletions[payload.taskId];
 
@@ -36,6 +47,12 @@ export const trackerOperations = {
   }),
 
   creation: createRequestLifecycle<TrackerApiState, Task>()('tracker/creation', {
+    invalidation: {
+      registry: trackerInvalidation,
+      tags: (input: TaskCreationInput, result: Task) => [
+        ...taskTags(input.task.id), { type: 'Task', id: result.id },
+      ],
+    },
     pending: (state, payload: TaskCreationInput) => {
       const pending = state.creations[payload.operationId];
 
@@ -44,6 +61,10 @@ export const trackerOperations = {
   }),
 
   status: createRequestLifecycle<TrackerApiState, TaskStatus>()('tracker/status', {
+    invalidation: {
+      registry: trackerInvalidation,
+      tags: (input: TaskFieldInput<TaskStatus>) => taskTags(input.taskId),
+    },
     pending: (state, payload: TaskFieldInput<TaskStatus>) => {
       const pending = state.statusWrites[payload.taskId];
 
@@ -52,6 +73,10 @@ export const trackerOperations = {
   }),
 
   priority: createRequestLifecycle<TrackerApiState, TaskPriority>()('tracker/priority', {
+    invalidation: {
+      registry: trackerInvalidation,
+      tags: (input: TaskFieldInput<TaskPriority>) => taskTags(input.taskId),
+    },
     pending: (state, payload: TaskFieldInput<TaskPriority>) => {
       const pending = state.priorityWrites[payload.taskId];
 
@@ -60,6 +85,12 @@ export const trackerOperations = {
   }),
 
   personName: createRequestLifecycle<TrackerApiState, Person>()('tracker/personName', {
+    invalidation: {
+      registry: trackerInvalidation,
+      tags: (input: PersonNameInput, result: Person) => [
+        { type: 'Person', id: input.personId }, { type: 'Person', id: result.id },
+      ],
+    },
     pending: (state, payload: PersonNameInput) => {
       const pending = state.personWrites[payload.personId];
 
@@ -68,6 +99,10 @@ export const trackerOperations = {
   }),
 
   assignee: createRequestLifecycle<TrackerApiState, string | null>()('tracker/assignee', {
+    invalidation: {
+      registry: trackerInvalidation,
+      tags: (input: TaskFieldInput<string | null>) => taskTags(input.taskId),
+    },
     pending: (state, payload: TaskFieldInput<string | null>) => {
       const pending = state.assigneeWrites[payload.taskId];
 

@@ -20,11 +20,18 @@ import type {
   PayloadAction,
   SliceActions,
 } from './contracts.js';
+import type {
+  InvalidationRegistry,
+  InvalidationTag,
+  QueryInvalidationRegistry,
+} from './invalidation.js';
+import { PostCommitError } from './postCommitError.js';
 
 export type ApiRequest =
   | {
     readonly status: 'pending' | 'succeeded' | 'superseded';
-    readonly requestId: string
+    readonly requestId: string;
+    readonly generation?: number;
   }
   | {
     readonly status: 'failed' | 'cancelled';
@@ -57,6 +64,7 @@ type Request<Variables> = {
   readonly scope: string;
   readonly requestId: string;
   readonly variables: Variables;
+  readonly generation?: number;
 };
 
 type Success<Variables, Normalized> = Request<Variables> & { readonly result: Normalized };
@@ -70,12 +78,21 @@ type Store<State, Action> = {
   readonly dispatch: (action: Action) => Effect.Effect<unknown>;
 };
 
-type OperationOptions<Variables extends object, Data, Normalized> = {
+type OperationOptions<State, Variables extends object, Data, Normalized, Name extends string, Action> = {
   readonly document?: string;
   readonly operationName?: string;
   readonly decode: (data: unknown, variables: Variables) => Data;
   readonly normalize: (data: Data, variables: Variables) => Normalized;
   readonly scope?: (variables: Variables) => string;
+  readonly invalidation?: {
+    readonly registry: InvalidationRegistry<State, Name, Action>;
+    readonly tags: (variables: Variables, result: Normalized) => readonly InvalidationTag<Name>[];
+  };
+  readonly provides?: {
+    readonly registry: QueryInvalidationRegistry<State, Name, Action>;
+    readonly fromVariables: (variables: Variables) => readonly InvalidationTag<Name>[];
+    readonly fromResult: (result: Normalized, variables: Variables) => readonly InvalidationTag<Name>[];
+  };
 };
 
 type OperationReducers<State, Variables, Normalized> = {
@@ -87,24 +104,28 @@ type OperationReducers<State, Variables, Normalized> = {
 type OperationActions<Name extends string, Key extends string, Variables, Normalized> =
   | PayloadAction<Request<Variables>, `${Name}/${Key}/started`>
   | PayloadAction<Success<Variables, Normalized>, `${Name}/${Key}/succeeded`>
+  | PayloadAction<Request<Variables>, `${Name}/${Key}/superseded`>
   | PayloadAction<Failure<Variables>, `${Name}/${Key}/failed`>
   | PayloadAction<Failure<Variables>, `${Name}/${Key}/cancelled`>;
 
-type Operation<State, Name extends string, Key extends string, Variables extends object, Data, Normalized> = {
+type Operation<State, Name extends string, Key extends string, Variables extends object, Data, Normalized, Action = never> = {
   readonly kind: 'query' | 'mutation';
   readonly actions: {
     readonly started: ActionCreator<Request<Variables>, `${Name}/${Key}/started`>;
     readonly succeeded: ActionCreator<Success<Variables, Normalized>, `${Name}/${Key}/succeeded`>;
+    readonly superseded: ActionCreator<Request<Variables>, `${Name}/${Key}/superseded`>;
     readonly failed: ActionCreator<Failure<Variables>, `${Name}/${Key}/failed`>;
     readonly cancelled: ActionCreator<Failure<Variables>, `${Name}/${Key}/cancelled`>;
   };
   readonly key: (variables: Variables) => string;
   readonly selectRequest: (state: State, variables: Variables) => ApiRequest | undefined;
+  readonly selectFreshness: (state: State, variables: Variables) => 'uninitialized' | 'fresh' | 'stale';
   readonly reducer: (handlers: OperationReducers<State, Variables, Normalized>) =>
     (state: State, action: { readonly type: string }) => State;
   readonly run: (input: {
     readonly variables: Variables;
-    readonly store: Store<State, OperationActions<Name, Key, Variables, Normalized>>;
+    readonly store: Store<State, OperationActions<Name, Key, Variables, Normalized> | Action>;
+    readonly fence?: { readonly identity: string; readonly requestId: string };
     readonly endpoint?: string;
     readonly headers?: HeadersInit;
     readonly fetcher?: Fetcher;
@@ -112,7 +133,8 @@ type Operation<State, Name extends string, Key extends string, Variables extends
   }) => Effect.Effect<RequestOutcome, Error>;
   readonly runWithResult: (input: {
     readonly variables: Variables;
-    readonly store: Store<State, OperationActions<Name, Key, Variables, Normalized>>;
+    readonly store: Store<State, OperationActions<Name, Key, Variables, Normalized> | Action>;
+    readonly fence?: { readonly identity: string; readonly requestId: string };
     readonly endpoint?: string;
     readonly headers?: HeadersInit;
     readonly fetcher?: Fetcher;
@@ -121,11 +143,11 @@ type Operation<State, Name extends string, Key extends string, Variables extends
 };
 
 type OperationBuilder<State, Name extends string> = <
-  const Key extends string, Variables extends object, Data, Normalized,
+  const Key extends string, Variables extends object, Data, Normalized, const Tag extends string = never, Action = never,
 >(
   key: Key,
-  options: OperationOptions<Variables, Data, Normalized>,
-) => Operation<State, Name, Key, Variables, Data, Normalized>;
+  options: OperationOptions<State, Variables, Data, Normalized, Tag, Action>,
+) => Operation<State, Name, Key, Variables, Data, Normalized, Action>;
 
 export type RequestApiBuilder<State, Name extends string> = {
   readonly query: OperationBuilder<State, Name>;
@@ -159,6 +181,7 @@ export function createRequestApi<
 ) {
   const keys = new Set<string>();
   const metadata = new Map<string, (state: Draft<State>, action: { readonly type: string }) => void>();
+  const metadataGuards = new Map<string, (state: State, action: { readonly type: string }) => boolean>();
   let defining = true;
 
   function caseHandler<Payload, Type extends string>(
@@ -176,27 +199,34 @@ export function createRequestApi<
     };
   }
 
-  function define<const Key extends string, Variables extends object, Data, Normalized>(
+  function define<const Key extends string, Variables extends object, Data, Normalized, const Tag extends string, Action>(
     kind: 'query' | 'mutation',
     key: Key,
-    operation: OperationOptions<Variables, Data, Normalized>,
-  ): Operation<State, Name, Key, Variables, Data, Normalized> {
+    operation: OperationOptions<State, Variables, Data, Normalized, Tag, Action>,
+  ): Operation<State, Name, Key, Variables, Data, Normalized, Action> {
     if (!defining)
       throw new Error('Operations can only be defined while creating a request API.');
 
     if (keys.has(key))
       throw new Error(`Duplicate operation: ${key}`);
 
+    if (kind === 'query' && operation.invalidation)
+      throw new Error('Mutation invalidation cannot be configured on a query.');
+
+    if (kind === 'mutation' && operation.provides)
+      throw new Error('Query dependencies cannot be configured on a mutation.');
+
     keys.add(key);
 
     const started = createAction<Request<Variables>, `${Name}/${Key}/started`>(`${options.name}/${key}/started`);
     const succeeded = createAction<Success<Variables, Normalized>, `${Name}/${Key}/succeeded`>(`${options.name}/${key}/succeeded`);
+    const superseded = createAction<Request<Variables>, `${Name}/${Key}/superseded`>(`${options.name}/${key}/superseded`);
     const failed = createAction<Failure<Variables>, `${Name}/${Key}/failed`>(`${options.name}/${key}/failed`);
     const cancelled = createAction<Failure<Variables>, `${Name}/${Key}/cancelled`>(`${options.name}/${key}/cancelled`);
     const getApiState = options.getState;
     const operationKey = (variables: Variables): string =>
       JSON.stringify([options.name, key, variablesKey(variables)]);
-    type ReceivingStore = Store<State, OperationActions<Name, Key, Variables, Normalized>>;
+    type ReceivingStore = Store<State, OperationActions<Name, Key, Variables, Normalized> | Action>;
     type InFlight = {
       readonly result: Deferred.Deferred<RequestResult<Normalized>, Error>;
       readonly worker: Deferred.Deferred<Fiber.Fiber<RequestResult<Normalized>, Error>>;
@@ -268,16 +298,59 @@ export function createRequestApi<
         api.latest[request.scope]?.requestId === request.requestId;
     }
 
+    const invalidation = operation.invalidation;
+    const provides = operation.provides;
+
+    function allowsSuccess(state: State, action: { readonly type: string }): boolean {
+      function matches(value: { readonly type: string }): value is PayloadAction<
+        Success<Variables, Normalized>,
+        `${Name}/${Key}/succeeded`
+      > {
+        return value.type === succeeded.type;
+      }
+
+      if (!matches(action))
+        return true;
+
+      if (
+        invalidation &&
+        owns(getApiState(state), action.payload) &&
+        !invalidation.registry.hasReceipt(state, invalidation.registry.mutationReceipt(action.payload.requestId))
+      )
+        throw new Error(`Invalidation registry must run before ${key} success.`);
+
+      return !provides || provides.registry.isEligible(state, {
+        identity: action.payload.key,
+        requestId: action.payload.requestId,
+        tags: provides.fromResult(action.payload.result, action.payload.variables),
+      });
+    }
+
+    invalidation?.registry.registerMutation({
+      action: succeeded,
+      owns: (state, payload) => owns(getApiState(state), payload),
+      tags: (payload) => invalidation.tags(payload.variables, payload.result),
+    });
+
     const startMetadata = caseHandler(started, (state, { payload }) => {
       const api = options.state(state);
-      if (api.requests[payload.key]?.status === 'pending')
+      const previousRequest = api.requests[payload.key];
+
+      if (
+        previousRequest?.status === 'pending' &&
+        (payload.generation === undefined || previousRequest.generation === payload.generation)
+      )
         return;
 
       const previous = api.latest[payload.scope];
       if (previous && api.requests[previous.key]?.status === 'pending')
         api.requests[previous.key] = { status: 'superseded', requestId: previous.requestId };
 
-      api.requests[payload.key] = { status: 'pending', requestId: payload.requestId };
+      api.requests[payload.key] = {
+        status: 'pending',
+        requestId: payload.requestId,
+        ...(payload.generation === undefined ? {} : { generation: payload.generation }),
+      };
       api.latest[payload.scope] = { key: payload.key, requestId: payload.requestId };
     });
     const successMetadata = caseHandler(succeeded, (state, { payload }) => {
@@ -293,16 +366,30 @@ export function createRequestApi<
 
     metadata.set(started.type, startMetadata);
     metadata.set(succeeded.type, successMetadata);
+    metadataGuards.set(succeeded.type, allowsSuccess);
+    metadata.set(superseded.type, caseHandler(superseded, (state, { payload }) => {
+      const api = options.state(state);
+
+      if (owns(api, payload))
+        api.requests[payload.key] = { status: 'superseded', requestId: payload.requestId };
+    }));
     metadata.set(failed.type, caseHandler(failed, (state, { payload }) => failureMetadata('failed', state, payload)));
     metadata.set(cancelled.type, caseHandler(cancelled, (state, { payload }) => failureMetadata('cancelled', state, payload)));
 
-    const resultOperation: Omit<Operation<State, Name, Key, Variables, Data, Normalized>, 'run'> = {
+    const resultOperation: Omit<Operation<State, Name, Key, Variables, Data, Normalized, Action>, 'run'> = {
       kind,
       key: operationKey,
       selectRequest: (state, variables) => getApiState(state).requests[operationKey(variables)],
+      selectFreshness: (state, variables) => {
+        if (!provides)
+          throw new Error(`Query ${key} has no invalidation dependencies.`);
+
+        return provides.registry.select(state, operationKey(variables));
+      },
       actions: {
         started,
         succeeded,
+        superseded,
         failed,
         cancelled
       },
@@ -310,7 +397,12 @@ export function createRequestApi<
       reducer: (handlers) => {
         const domainCases = new Map<string, (state: Draft<State>, action: { readonly type: string }) => void>([
           [started.type, caseHandler(started, (state, { payload }) => {
-            if (options.state(state).requests[payload.key]?.status !== 'pending')
+            const previous = options.state(state).requests[payload.key];
+
+            if (
+              previous?.status !== 'pending' ||
+              (payload.generation !== undefined && previous.generation !== payload.generation)
+            )
               handlers.onStarted?.(state, payload);
           })],
           [succeeded.type, caseHandler(succeeded, (state, { payload }) => {
@@ -328,31 +420,67 @@ export function createRequestApi<
         ]);
 
         return (state, action) => {
+          if (action.type === succeeded.type && !allowsSuccess(state, action))
+            return state;
+
           const handler = domainCases.get(action.type);
           return handler ? produce<State>(state, (draft) => handler(draft, action)) : state;
         };
       },
 
       runWithResult: Effect.fnUntraced(function*(
-        input: Parameters<Operation<State, Name, Key, Variables, Data, Normalized>['run']>[0],
+        input: Parameters<Operation<State, Name, Key, Variables, Data, Normalized, Action>['run']>[0],
       ): Effect.fn.Return<RequestResult<Normalized>, Error> {
+        if (input.fence && !provides)
+          return yield* Effect.fail(new Error(`Query ${key} cannot use a fence without invalidation dependencies.`));
+
+        if (invalidation)
+          yield* invalidation.registry.ensureInstalled({ store: input.store });
+        if (provides)
+          yield* provides.registry.ensureInstalled({ store: input.store });
+
         const requestKey = operationKey(input.variables);
         const scope = JSON.stringify([options.name, key, operation.scope?.(input.variables) ?? requestKey]);
+        const state = yield* input.store.getState;
         const request: Request<Variables> = {
           key: requestKey,
           scope,
           variables: input.variables,
           requestId: yield* Effect.sync(() => crypto.randomUUID()),
+          ...(provides ? { generation: provides.registry.revision(state) } : {}),
         };
-        const current = getApiState(yield* input.store.getState);
+        const current = getApiState(state);
+        let serverCommitted = false;
+        let queryStarted = false;
 
-        if (current.requests[requestKey]?.status === 'pending') {
+        const previousRequest = current.requests[requestKey];
+
+        if (
+          previousRequest?.status === 'pending' &&
+          (request.generation === undefined || previousRequest.generation === request.generation)
+        ) {
           return kind === 'mutation'
             ? { status: 'skipped' }
             : yield* Effect.fail(new Error(`Pending ${key} request has no local execution.`));
         }
 
         const perform = Effect.fnUntraced(function*(): Effect.fn.Return<RequestResult<Normalized>, Error> {
+          if (provides) {
+            queryStarted = true;
+            yield* input.store.dispatch(provides.registry.actions.started({
+              identity: request.key,
+              requestId: request.requestId,
+              tags: provides.fromVariables(request.variables),
+              ...(input.fence ? { fence: input.fence, transient: true } : {}),
+            }));
+
+            if (!provides.registry.hasPending(yield* input.store.getState, {
+              identity: request.key,
+              requestId: request.requestId,
+            }))
+              return yield* Effect.fail(new Error(`Could not register ${key} query dependencies.`));
+          }
+
           yield* input.store.dispatch(started(request));
 
           if (!owns(getApiState(yield* input.store.getState), request)) {
@@ -362,8 +490,14 @@ export function createRequestApi<
           const result = yield* Effect.result(Effect.tryPromise({
             try: async (signal) => {
               const execute = async (): Promise<Data> => {
-                if (input.execute)
-                  return input.execute(input.variables, signal);
+                if (input.execute) {
+                  const data = await input.execute(input.variables, signal);
+
+                  if (kind === 'mutation')
+                    serverCommitted = true;
+
+                  return data;
+                }
 
                 const endpoint = input.endpoint ?? options.endpoint;
 
@@ -371,7 +505,7 @@ export function createRequestApi<
                   throw new Error('Request requires an execute callback or a GraphQL endpoint and document.');
                 }
 
-                return operation.decode(await requestGraphql({
+                const data = await requestGraphql({
                   endpoint,
                   document: operation.document,
                   variables: input.variables,
@@ -379,7 +513,12 @@ export function createRequestApi<
                   ...(operation.operationName ? { operationName: operation.operationName } : {}),
                   ...(input.fetcher ? { fetcher: input.fetcher } : {}),
                   ...(input.headers ? { headers: input.headers } : {}),
-                }), input.variables);
+                });
+
+                if (kind === 'mutation')
+                  serverCommitted = true;
+
+                return operation.decode(data, input.variables);
               };
               const data = await execute();
 
@@ -390,12 +529,85 @@ export function createRequestApi<
           }));
 
           if (result._tag === 'Success') {
+            if (provides) {
+              const tags = provides.fromResult(result.success, request.variables);
+              const eligible = provides.registry.isEligible(yield* input.store.getState, {
+                identity: request.key,
+                requestId: request.requestId,
+                tags,
+              });
+
+              if (!eligible) {
+                if (input.fence && !provides.registry.isEligible(yield* input.store.getState, {
+                  ...input.fence, tags,
+                })) {
+                  yield* input.store.dispatch(provides.registry.actions.succeeded({ ...input.fence, tags }));
+                }
+
+                if (!input.fence) {
+                  yield* input.store.dispatch(provides.registry.actions.succeeded({
+                    identity: request.key,
+                    requestId: request.requestId,
+                    tags,
+                  }));
+                }
+                yield* input.store.dispatch(superseded(request));
+                return { status: 'superseded' };
+              }
+            }
+
             yield* input.store.dispatch(succeeded({ ...request, result: result.success }));
 
-            const active = getApiState(yield* input.store.getState).latest[scope]?.requestId === request.requestId;
+            const settled = getApiState(yield* input.store.getState);
+            const active = settled.latest[scope]?.requestId === request.requestId;
+            const committed = settled.requests[request.key]?.status === 'succeeded' &&
+              settled.requests[request.key]?.requestId === request.requestId;
+
+            if (provides) {
+              const tags = provides.fromResult(result.success, request.variables);
+              const eligible = provides.registry.isEligible(yield* input.store.getState, {
+                identity: request.key,
+                requestId: request.requestId,
+                tags,
+              });
+
+              if (!input.fence) {
+                yield* input.store.dispatch(provides.registry.actions.succeeded({
+                  identity: request.key,
+                  requestId: request.requestId,
+                  tags,
+                }));
+              }
+
+              if (!eligible && !committed) {
+                if (input.fence && !provides.registry.isEligible(yield* input.store.getState, {
+                  ...input.fence, tags,
+                })) {
+                  yield* input.store.dispatch(provides.registry.actions.succeeded({ ...input.fence, tags }));
+                }
+
+                yield* input.store.dispatch(superseded(request));
+                return { status: 'superseded' };
+              }
+            }
+
+            if (active && !committed)
+              return yield* Effect.fail(new Error(`Could not settle ${key} request.`));
+
+            if (active && invalidation) {
+              const receipt = invalidation.registry.mutationReceipt(request.requestId);
+
+              if (!invalidation.registry.hasReceipt(yield* input.store.getState, receipt))
+                return yield* Effect.fail(new Error(`Could not invalidate ${key} request.`));
+
+              yield* input.store.dispatch(invalidation.registry.acknowledge(receipt));
+            }
 
             return active ? { status: 'succeeded', result: result.success } : { status: 'superseded' };
           }
+
+          if (serverCommitted)
+            return yield* Effect.fail(result.failure);
 
           yield* input.store.dispatch(failed({ ...request, error: result.failure.message }));
 
@@ -404,12 +616,29 @@ export function createRequestApi<
           return active ? { status: 'failed', error: result.failure.message } : { status: 'superseded' };
         });
 
-        return yield* perform().pipe(Effect.onError((cause) =>
-          input.store.dispatch(Cause.hasInterruptsOnly(cause)
-            ? cancelled({ ...request, error: 'Request interrupted.' })
-            : failed({ ...request, error: Cause.pretty(cause) })).pipe(Effect.asVoid)));
+        return yield* perform().pipe(
+          Effect.catchCause((cause) =>
+            serverCommitted && !Cause.hasInterruptsOnly(cause)
+              ? Effect.fail(new PostCommitError(key, Cause.pretty(cause)))
+              : Effect.failCause(cause)),
+          Effect.onError((cause) => serverCommitted
+            ? Effect.void
+            : input.store.dispatch(Cause.hasInterruptsOnly(cause)
+              ? cancelled({ ...request, error: 'Request interrupted.' })
+              : failed({ ...request, error: Cause.pretty(cause) })).pipe(Effect.asVoid)),
+          Effect.ensuring(Effect.suspend(() => provides && queryStarted
+            ? input.store.dispatch(provides.registry.actions.finished({
+              identity: request.key,
+              requestId: request.requestId,
+            })).pipe(Effect.asVoid)
+            : Effect.void)),
+        );
       }, (execution, input) => kind === 'query'
-        ? Effect.suspend(() => share(input.store, operationKey(input.variables), execution))
+        ? Effect.flatMap(input.store.getState, (state) => share(
+          input.store,
+          JSON.stringify([operationKey(input.variables), provides?.registry.revision(state) ?? 0]),
+          execution,
+        ))
         : execution),
     };
 
@@ -435,6 +664,11 @@ export function createRequestApi<
     operations,
     reducer: (state: State, action: { readonly type: string }): State => {
       const handler = metadata.get(action.type);
+      const guard = metadataGuards.get(action.type);
+
+      if (guard && !guard(state, action))
+        return state;
+
       return handler ? produce<State>(state, (draft) => handler(draft, action)) : state;
     },
   };
