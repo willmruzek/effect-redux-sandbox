@@ -19,16 +19,13 @@ import {
 
 import {
   createTrackerApiState,
-  trackerApi,
   type TrackerApiState
 } from './api';
-import {
-  trackerOperations,
-  operationActions
-} from './trackerOperations';
-import { trackerApiReducer } from './trackerApiReducers';
-import { trackerOperationReducer } from './trackerOperationReducers';
-import { trackerInvalidation, type TrackerTag } from './trackerInvalidation';
+import type { TrackerApiDefinitions } from './trackerApiDefinition';
+import type { TrackerOperations } from './trackerOperations';
+import type { TrackerApiReducers } from './trackerApiReducers';
+import { createTrackerOperationReducer } from './trackerOperationReducers';
+import { createTrackerInvalidation, type TrackerTag } from './trackerInvalidation';
 
 const tracker = createSlice({
   name: 'tracker',
@@ -130,20 +127,25 @@ const tracker = createSlice({
   }),
 });
 
-export function rootReducer(input: Readonly<{
-  state: RootState;
-  action: StoreAction
-}>): RootState {
-  const invalidationState = trackerInvalidation.reducer(input.state, input.action);
-  const readState = trackerApiReducer({ state: invalidationState, action: input.action });
-  const operationState = trackerOperationReducer({ state: readState, action: input.action });
+export function createTrackerRootReducer(input: Readonly<{
+  invalidation: ReturnType<typeof createTrackerInvalidation>;
+  apiReducer: TrackerApiReducers['reducer'];
+  operationReducer: ReturnType<typeof createTrackerOperationReducer>;
+}>) {
+  return (actionInput: Readonly<{
+    state: RootState;
+    action: StoreAction;
+  }>): RootState => {
+    const invalidationState = input.invalidation.reducer(actionInput.state, actionInput.action);
+    const readState = input.apiReducer({ state: invalidationState, action: actionInput.action });
+    const operationState = input.operationReducer({ state: readState, action: actionInput.action });
+    const next = tracker.reducer({ state: operationState, action: actionInput.action });
 
-  const next = tracker.reducer({ state: operationState, action: input.action });
-
-  return isLocalAction(input.action) ? reduceLocalData(next, input.action) : next;
+    return isLocalAction(actionInput.action) ? reduceLocalData(next, actionInput.action) : next;
+  };
 }
 
-export const trackerActions = { ...tracker.actions, ...operationActions };
+export const trackerActions = tracker.actions;
 
 export type RootState = TrackerApiState;
 
@@ -152,5 +154,6 @@ export type StoreAction =
   | InvalidationAction<TrackerTag>
   | PaginationAction<string, NormalizedTaskPage>
   | SliceActions<typeof trackerActions>
-  | RequestActions<typeof trackerApi.operations>
-  | RequestActions<typeof trackerOperations>;
+  | RequestActions<TrackerApiDefinitions['graphql']['endpoints']>
+  | RequestActions<TrackerApiDefinitions['rest']['endpoints']>
+  | RequestActions<TrackerOperations>;

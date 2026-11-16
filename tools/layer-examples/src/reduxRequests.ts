@@ -7,7 +7,7 @@ import { Effect } from 'effect';
 import {
   createEntityTable,
   createOptimisticFieldReducers,
-  createRequestApi,
+  createGraphqlApi,
   createRequestLifecycle,
   type RequestActions,
 } from '@repo/redux-toolkit';
@@ -21,11 +21,18 @@ import {
   type QuantityInput,
 } from './inventory.js';
 
-export function createReduxRequests({ registerWrites = true } = {}) {
+export function createReduxRequests({
+  registerWrites = true,
+  fetcher,
+}: {
+  readonly registerWrites?: boolean;
+  readonly fetcher?: (url: string, init: RequestInit) => Promise<Response>;
+} = {}) {
   const items = createEntityTable({ name: 'inventory', key: (item: Item) => item.sku });
-  const api = createRequestApi({
+  const api = createGraphqlApi({
     name: 'inventory',
     endpoint: '/inventory',
+    ...(fetcher ? { fetcher } : {}),
     state: (state) => state.api,
     getState: (state: InventoryState) => state.api,
 

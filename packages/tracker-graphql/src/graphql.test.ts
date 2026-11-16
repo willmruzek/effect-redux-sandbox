@@ -7,6 +7,7 @@ import {
 } from 'vitest';
 
 import {
+  decodeTaskUpdate,
   fetchInitialTrackerData,
   fetchTaskUpdate
 } from './client.js';
@@ -91,6 +92,19 @@ describe('shared fake GraphQL endpoint', () => {
 });
 
 describe('minimal GraphQL client', () => {
+  test('rejects a task update response for a different ID', () => {
+    // Arrange: the response contains an otherwise valid task.
+    const data = {
+      updateTask: {
+        id: 'other', projectId: 'project', assigneeId: null, title: 'Task',
+        status: 'todo', priority: 'medium', description: 'Detail',
+      },
+    };
+
+    // Act / Assert: the reusable decoder enforces the requested identity.
+    expect(() => decodeTaskUpdate(data, 'task')).toThrow('Invalid GraphQL response for UpdateTask.');
+  });
+
   test('decodes authoritative task mutation responses', async () => {
     // Arrange: execute against a real server-owned repository.
     const fetcher = vi.fn(async (url: string, init: RequestInit) => handleApiRequest(new Request(url, init)));

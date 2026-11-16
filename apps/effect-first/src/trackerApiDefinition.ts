@@ -1,38 +1,43 @@
 import { createEntityTable, variablesKey } from '@repo/gql-api';
 import {
+  createOptimisticOwnership,
+  createGraphqlApi,
+  createRestApi,
   cursorChainKey,
   validateCursorPage,
-  type InvalidationState,
-  type RequestApiOptions,
-  type RequestApiState,
-  type CursorPaginationState
 } from '@repo/effect-store-toolkit';
 import {
   createInitialState,
   type TrackerState,
-  type TrackerViewState,
   type TaskPage,
   type TaskQuery,
   type Project,
   type Person,
   type Task,
-  type TaskDetailState,
   type NormalizedTaskPage,
   type TrackerSourceMode,
 } from '@repo/project-tracker';
 import {
+  decodeTaskUpdate,
   decodeTrackerPage,
+  taskUpdateOperation,
   trackerPageOperation
 } from '@repo/tracker-graphql/client';
+import {
+  decodeRestPersonUpdate,
+  decodeRestTask,
+  decodeRestTrackerPage,
+} from '@repo/tracker-graphql/rest-client';
 
-import { pageTags, taskPageTags, trackerInvalidation, type TrackerTag } from './trackerInvalidation';
+import type { TrackerApiState } from './trackerApiState';
+import { TrackerApiStore } from './trackerApiStore';
+import {
+  createTrackerInvalidation,
+  pageTags,
+  taskPageTags,
+} from './trackerInvalidation';
 
-export type TrackerApiState = TrackerViewState & {
-  readonly api: RequestApiState;
-  readonly detail: TaskDetailState;
-  readonly invalidation: InvalidationState<TrackerTag>;
-  readonly pagination: CursorPaginationState<string>;
-};
+export type { TrackerApiState } from './trackerApiState';
 
 type TaskVariables = {
   readonly after: string | null;
@@ -64,7 +69,10 @@ const tasks = createEntityTable({
   key: (task: Task) => task.id
 });
 
-export function createTrackerApiState(initial: TrackerState = createInitialState()): TrackerApiState {
+export function createTrackerApiState(
+  initial: TrackerState = createInitialState(),
+  invalidation: ReturnType<typeof createTrackerInvalidation> = createTrackerInvalidation(),
+): TrackerApiState {
   const identity = variablesKey({ query: initial.result.query, sourceMode: 'graphql' });
   const state: TrackerApiState = {
     ...initial,
@@ -84,7 +92,7 @@ export function createTrackerApiState(initial: TrackerState = createInitialState
     detail: { status: 'idle' },
   };
 
-  return trackerInvalidation.reducer(state, trackerInvalidation.actions.seed({
+  return invalidation.reducer(state, invalidation.actions.seed({
     identity: cursorChainKey('trackerTasks', identity),
     tags: pageTags(initial.result.ids, Object.keys(initial.people)),
   }));
@@ -97,7 +105,6 @@ function normalizePage({ page, loadedPages }: TrackerRead, variables: TaskVariab
     hasNextPage: page.pageInfo.hasNextPage,
   });
 
-  // The decoder supplies projectId/assigneeId foreign keys; no response tree is cached.
   return {
     entities: {
       projects: projects.normalize(page.projects),
@@ -114,31 +121,215 @@ function normalizePage({ page, loadedPages }: TrackerRead, variables: TaskVariab
   };
 }
 
-export const trackerApiOptions = {
-  name: 'trackerApi',
-  endpoint: '/graphql',
+export type TrackerApiFetcher = (url: string, init: RequestInit) => Promise<Response>;
 
-  state: (state) => state.api,
+export type TrackerApiTransportOptions = Readonly<{
+  graphqlFetcher?: TrackerApiFetcher;
+  restFetcher?: TrackerApiFetcher;
+}>;
 
-  getState: (state) => state.api,
+type AssigneeVariables = {
+  readonly id: string;
+  readonly patch: { readonly assigneeId: string | null };
+  readonly fail: boolean;
+  readonly delayMs: number;
+  readonly sourceMode: TrackerSourceMode;
+};
 
-  operations: (api) => ({
-    tasks: api.query('tasks', {
-      document: trackerPageOperation,
-      operationName: 'TrackerPage',
+export function createTrackerApiDefinitions(input: TrackerApiTransportOptions & Readonly<{
+  invalidation: ReturnType<typeof createTrackerInvalidation>;
+}>) {
+  const ownership = createOptimisticOwnership();
 
-      decode: (data, variables: TaskVariables): TrackerRead => ({
-        page: decodeTrackerPage({ data }, variables), loadedPages: 1,
+  const graphql = createGraphqlApi({
+    name: 'trackerGraphql',
+    endpoint: '/graphql',
+    storeService: TrackerApiStore,
+    ...(input.graphqlFetcher ? { fetcher: input.graphqlFetcher } : {}),
+    state: (state) => state.api,
+    getState: (state: TrackerApiState) => state.api,
+    endpoints: (api) => ({
+      tasks: api.query('tasks', {
+        document: trackerPageOperation,
+        operationName: 'TrackerPage',
+        decode: (data, variables: TaskVariables): TrackerRead => ({
+          page: decodeTrackerPage({ data }, variables),
+          loadedPages: 1,
+        }),
+        normalize: normalizePage,
+        scope: () => 'tasks',
+        provides: {
+          registry: input.invalidation,
+          fromVariables: () => [{ type: 'TaskList' }],
+          fromResult: taskPageTags,
+        },
       }),
+      assignee: api.mutation('assignee', {
+        document: taskUpdateOperation,
+        operationName: 'UpdateTask',
+        decode: (data, variables: AssigneeVariables) => decodeTaskUpdate(data, variables.id),
+        normalize: (task) => task,
+        scope: (variables) => variables.id,
+        invalidation: {
+          registry: input.invalidation,
+          tags: (variables) => [
+            { type: 'TaskList' },
+            { type: 'Task', id: variables.id },
+          ],
+        },
+        optimistic: {
+          ownership,
+          targets: (_state, variables: AssigneeVariables) => [{
+            table: 'tasks',
+            id: variables.id,
+            incarnation: variables.id,
+            field: 'assigneeId',
+          }],
+          read: (state, target) => target.field === 'assigneeId'
+            ? state.tasks[target.id]?.assigneeId
+            : undefined,
+          proposed: (_state, variables: AssigneeVariables) => variables.patch.assigneeId,
+          confirmed: (task) => task.assigneeId,
+          write: (state, target, value) => {
+            const task = state.tasks[target.id];
 
-      normalize: normalizePage,
+            if (!task || target.field !== 'assigneeId' || (value !== null && typeof value !== 'string'))
+              throw new Error('Invalid optimistic assignee target.');
 
-      scope: () => 'tasks',
-      provides: {
-        registry: trackerInvalidation,
-        fromVariables: () => [{ type: 'TaskList' }],
-        fromResult: taskPageTags,
-      },
+            task.assigneeId = value;
+          },
+        },
+      }),
     }),
-  }),
-} satisfies RequestApiOptions<TrackerApiState, 'trackerApi', Readonly<Record<string, unknown>>>;
+  });
+
+  const rest = createRestApi({
+    name: 'trackerRest',
+    basePath: '/api',
+    storeService: TrackerApiStore,
+    ...(input.restFetcher ? { fetcher: input.restFetcher } : {}),
+    state: (state) => state.api,
+    getState: (state: TrackerApiState) => state.api,
+    endpoints: (api) => ({
+      tasks: api.query('tasks', {
+        request: (variables: TaskVariables) => ({
+          path: '/tracker',
+          method: 'GET',
+          query: {
+            first: 20,
+            status: variables.query.status,
+            search: variables.query.search,
+            assigneeId: variables.query.assigneeId,
+            sort: variables.query.sort,
+            projectId: variables.query.projectId,
+            after: variables.after,
+            fail: variables.fail,
+          },
+          response: 'json',
+        }),
+        decode: (data, variables: TaskVariables): TrackerRead => ({
+          page: decodeRestTrackerPage(data, variables.after),
+          loadedPages: 1,
+        }),
+        normalize: normalizePage,
+        scope: () => 'tasks',
+        provides: {
+          registry: input.invalidation,
+          fromVariables: () => [{ type: 'TaskList' }],
+          fromResult: taskPageTags,
+        },
+      }),
+      assignee: api.mutation('assignee', {
+        request: (variables: AssigneeVariables) => ({
+          path: `/tasks/${encodeURIComponent(variables.id)}`,
+          method: 'PATCH',
+          body: {
+            patch: variables.patch,
+            fail: variables.fail,
+            delayMs: variables.delayMs,
+          },
+          response: 'json',
+        }),
+        decode: (data, variables: AssigneeVariables) => decodeRestTask(data, variables.id),
+        normalize: (task) => task,
+        scope: (variables) => variables.id,
+        invalidation: {
+          registry: input.invalidation,
+          tags: (variables) => [
+            { type: 'TaskList' },
+            { type: 'Task', id: variables.id },
+          ],
+        },
+        optimistic: {
+          ownership,
+          targets: (_state, variables: AssigneeVariables) => [{
+            table: 'tasks',
+            id: variables.id,
+            incarnation: variables.id,
+            field: 'assigneeId',
+          }],
+          read: (state, target) => target.field === 'assigneeId'
+            ? state.tasks[target.id]?.assigneeId
+            : undefined,
+          proposed: (_state, variables: AssigneeVariables) => variables.patch.assigneeId,
+          confirmed: (task) => task.assigneeId,
+          write: (state, target, value) => {
+            const task = state.tasks[target.id];
+
+            if (!task || target.field !== 'assigneeId' || (value !== null && typeof value !== 'string'))
+              throw new Error('Invalid optimistic assignee target.');
+
+            task.assigneeId = value;
+          },
+        },
+      }),
+      renamePerson: api.mutation('renamePerson', {
+        request: (variables: {
+          readonly personId: string;
+          readonly name: string;
+        }) => ({
+          path: `/people/${encodeURIComponent(variables.personId)}`,
+          method: 'PATCH',
+          body: { name: variables.name },
+          response: 'json',
+        }),
+        decode: (data, variables) => decodeRestPersonUpdate(data, variables.personId),
+        normalize: (person) => person,
+        scope: (variables) => variables.personId,
+        invalidation: {
+          registry: input.invalidation,
+          tags: (variables, person) => [
+            { type: 'Person', id: variables.personId },
+            { type: 'Person', id: person.id },
+          ],
+        },
+        optimistic: {
+          ownership,
+          targets: (_state, variables) => [{
+            table: 'people',
+            id: variables.personId,
+            incarnation: variables.personId,
+            field: 'name',
+          }],
+          read: (state, target) => target.field === 'name'
+            ? state.people[target.id]?.name
+            : undefined,
+          proposed: (_state, variables) => variables.name,
+          confirmed: (person) => person.name,
+          write: (state, target, value) => {
+            const person = state.people[target.id];
+
+            if (!person || target.field !== 'name' || typeof value !== 'string')
+              throw new Error('Invalid optimistic person target.');
+
+            person.name = value;
+          },
+        },
+      }),
+    }),
+  });
+
+  return { graphql, rest };
+}
+
+export type TrackerApiDefinitions = ReturnType<typeof createTrackerApiDefinitions>;

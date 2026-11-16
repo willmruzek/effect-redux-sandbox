@@ -17,10 +17,9 @@ import {
   createTrackerApiState,
   type TrackerApiState
 } from './api';
-import { operationActions } from './trackerOperations';
-import { trackerApiReducer } from './trackerApiReducers';
-import { trackerOperationReducer } from './trackerOperationReducers';
-import { trackerInvalidation } from './trackerInvalidation';
+import type { TrackerApiReducers } from './trackerApiReducers';
+import { createTrackerOperationReducer } from './trackerOperationReducers';
+import { createTrackerInvalidation } from './trackerInvalidation';
 
 const tracker = createSlice({
   name: 'tracker',
@@ -106,16 +105,22 @@ const tracker = createSlice({
   },
 });
 
-export function rootReducer(state: RootState | undefined, action: UnknownAction): RootState {
-  const invalidationState = trackerInvalidation.reducer(state ?? createTrackerApiState(), action);
-  const readState = trackerApiReducer(invalidationState, action);
-  const operationState = trackerOperationReducer(readState, action);
+export function createTrackerRootReducer(input: Readonly<{
+  invalidation: ReturnType<typeof createTrackerInvalidation>;
+  apiReducer: TrackerApiReducers['reducer'];
+  operationReducer: ReturnType<typeof createTrackerOperationReducer>;
+}>) {
+  return (state: RootState | undefined, action: UnknownAction): RootState => {
+    const initialState = state ?? createTrackerApiState(undefined, input.invalidation);
+    const invalidationState = input.invalidation.reducer(initialState, action);
+    const readState = input.apiReducer(invalidationState, action);
+    const operationState = input.operationReducer(readState, action);
+    const next = tracker.reducer(operationState, action);
 
-  const next = tracker.reducer(operationState, action);
-
-  return isLocalAction(action) ? reduceLocalData(next, action) : next;
+    return isLocalAction(action) ? reduceLocalData(next, action) : next;
+  };
 }
 
-export const trackerActions = { ...tracker.actions, ...operationActions };
+export const trackerActions = tracker.actions;
 
 export type RootState = TrackerApiState;

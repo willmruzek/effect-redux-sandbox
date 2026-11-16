@@ -5,9 +5,9 @@ import {
 } from 'vitest';
 
 import {
-  rootReducer,
   trackerActions
 } from './reducer';
+import { createTrackerServices } from './trackerServices';
 
 function expectDataOnly(value: unknown, seen = new WeakSet<object>()): void {
   if (typeof value === 'function')
@@ -25,10 +25,11 @@ function expectDataOnly(value: unknown, seen = new WeakSet<object>()): void {
 describe('Redux reducer state', () => {
   test('contains only data after initialization and a plain action', () => {
     // Arrange: initialize the reducer with an ordinary Redux action.
-    const initial = rootReducer(undefined, { type: '@@test/init' });
+    const services = createTrackerServices();
+    const initial = services.createInitialState();
 
     // Act: select a project through a plain action.
-    const updated = rootReducer(initial, trackerActions.projectSelected('atlas'));
+    const updated = services.reducer(initial, trackerActions.projectSelected('atlas'));
 
     // Assert: both reducer outputs remain data-only.
     expectDataOnly(initial);

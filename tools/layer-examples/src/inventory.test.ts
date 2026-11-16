@@ -33,11 +33,8 @@ for (const [name, create] of [
   describe(`${name} public request APIs in an inventory domain`, () => {
     test('shares a duplicate query triggered by a synchronous started observer', async () => {
       // Arrange: a started-action observer launches another query immediately.
-      const inventory = create();
       const pending = pendingResponse();
-      const duplicateTransport = vi.fn(async () => Response.json({
-        data: { item: { sku: 'tea', label: 'Tea', quantity: 9 } },
-      }));
+      const inventory = create({ fetcher: pending.fetcher });
       let observed = false;
       let duplicate: Promise<unknown> | undefined;
       const service: typeof inventory.service = {
@@ -47,7 +44,7 @@ for (const [name, create] of [
           if (!observed && action.type === 'inventory/item/started') {
             observed = true;
             duplicate = Effect.runPromise(inventory.read.run({
-              store: service, variables: { sku: 'tea' }, fetcher: duplicateTransport,
+              store: service, variables: { sku: 'tea' },
             }));
           }
           return result;
@@ -57,7 +54,7 @@ for (const [name, create] of [
       try {
         // Act: start the original query, triggering the observer's duplicate.
         const first = Effect.runPromise(inventory.read.run({
-          store: service, variables: { sku: 'tea' }, fetcher: pending.fetcher,
+          store: service, variables: { sku: 'tea' },
         }));
         expect(duplicate).toBeDefined();
         pending.resolve(Response.json({
@@ -67,7 +64,6 @@ for (const [name, create] of [
 
         // Assert: registration precedes observers without treating the worker as closing.
         expect(results).toEqual([{ status: 'succeeded' }, { status: 'succeeded' }]);
-        expect(duplicateTransport).not.toHaveBeenCalled();
         expect(pending.fetcher).toHaveBeenCalledTimes(1);
         expect(inventory.snapshot().items.tea?.quantity).toBe(8);
       } finally {
@@ -77,11 +73,11 @@ for (const [name, create] of [
 
     test('preserves immediate ownership when executing with a synchronous service', async () => {
       // Arrange: transport stays pending after a synchronous ownership claim.
-      const inventory = create();
       const pending = pendingResponse();
+      const inventory = create({ fetcher: pending.fetcher });
       const variables = { sku: 'tea' };
       const query = inventory.read.run({
-        store: inventory.service, variables, fetcher: pending.fetcher,
+        store: inventory.service, variables,
       });
 
       // Act: execute until transport suspends.
@@ -99,13 +95,13 @@ for (const [name, create] of [
 
     test('keeps query construction lazy', async () => {
       // Arrange: an idle consumer and transport.
-      const inventory = create();
       const fetcher = vi.fn(async () => Response.json({ data: {} }));
+      const inventory = create({ fetcher });
       const before = inventory.snapshot();
 
       try {
         // Act: construct without executing the query.
-        inventory.read.run({ store: inventory.service, variables: { sku: 'tea' }, fetcher });
+        inventory.read.run({ store: inventory.service, variables: { sku: 'tea' } });
 
         // Assert: construction does not claim state or start transport.
         expect(inventory.snapshot()).toBe(before);
@@ -117,9 +113,14 @@ for (const [name, create] of [
 
     test('shares a superseded query outcome with its waiters', async () => {
       // Arrange: identical old queries share one selected-item scope.
-      const inventory = create();
       const pending = pendingResponse();
-      const input = { store: inventory.service, variables: { sku: 'tea' }, fetcher: pending.fetcher };
+      const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+        .mockImplementationOnce(pending.fetcher)
+        .mockResolvedValueOnce(Response.json({
+          data: { item: { sku: 'coffee', label: 'Coffee', quantity: 5 } },
+        }));
+      const inventory = create({ fetcher });
+      const input = { store: inventory.service, variables: { sku: 'tea' } };
 
       try {
         const first = Effect.runPromise(inventory.read.run(input));
@@ -130,9 +131,6 @@ for (const [name, create] of [
         await Effect.runPromise(inventory.read.run({
           store: inventory.service,
           variables: { sku: 'coffee' },
-          fetcher: async () => Response.json({
-            data: { item: { sku: 'coffee', label: 'Coffee', quantity: 5 } },
-          }),
         }));
         pending.resolve(Response.json({
           data: { item: { sku: 'tea', label: 'Tea', quantity: 8 } },
@@ -148,24 +146,24 @@ for (const [name, create] of [
       }
     });
 
-    test('does not share one operation across receiving stores', async () => {
-      // Arrange: one definition is consumed by two independent stores.
-      const first = create();
-      const second = create();
+    test('does not share query execution across receiving stores', async () => {
+      // Arrange: each independent store owns its own API definition.
       const pending = pendingResponse();
       const other = vi.fn(async () => Response.json({
         data: { item: { sku: 'tea', label: 'Tea', quantity: 9 } },
       }));
+      const first = create({ fetcher: pending.fetcher });
+      const second = create({ fetcher: other });
 
       try {
         const original = Effect.runPromise(first.read.run({
-          store: first.service, variables: { sku: 'tea' }, fetcher: pending.fetcher,
+          store: first.service, variables: { sku: 'tea' },
         }));
         await Effect.runPromise(Effect.yieldNow);
 
-        // Act: run the same definition/key against the second store.
-        await Effect.runPromise(first.read.run({
-          store: second.service, variables: { sku: 'tea' }, fetcher: other,
+        // Act: run the same key against the second store's definition.
+        await Effect.runPromise(second.read.run({
+          store: second.service, variables: { sku: 'tea' },
         }));
         pending.resolve(Response.json({
           data: { item: { sku: 'tea', label: 'Tea', quantity: 8 } },
@@ -184,8 +182,8 @@ for (const [name, create] of [
 
     test('shares a failed query outcome with one lifecycle', async () => {
       // Arrange: two callers use one pending transport.
-      const inventory = create();
       const pending = pendingResponse();
+      const inventory = create({ fetcher: pending.fetcher });
       const actions: string[] = [];
       const service = {
         ...inventory.service,
@@ -194,13 +192,12 @@ for (const [name, create] of [
           return inventory.service.dispatch(action);
         },
       };
-      const input = { store: service, variables: { sku: 'tea' }, fetcher: pending.fetcher };
+      const input = { store: service, variables: { sku: 'tea' } };
 
       try {
         // Act: both callers await the original malformed response.
         const first = Effect.runPromise(inventory.read.run(input));
-        const duplicateTransport = vi.fn(async () => Response.json({ data: {} }));
-        const second = Effect.runPromise(inventory.read.run({ ...input, fetcher: duplicateTransport }));
+        const second = Effect.runPromise(inventory.read.run(input));
         await Effect.runPromise(Effect.yieldNow);
         pending.resolve(Response.json({ data: {} }));
         const outcomes = await Promise.all([first, second]);
@@ -209,7 +206,6 @@ for (const [name, create] of [
         expect(outcomes[0]?.status).toBe('failed');
         expect(outcomes[1]).toBe(outcomes[0]);
         expect(pending.fetcher).toHaveBeenCalledTimes(1);
-        expect(duplicateTransport).not.toHaveBeenCalled();
         expect(actions).toEqual(['inventory/item/started', 'inventory/item/failed']);
       } finally {
         await inventory.dispose();
@@ -218,8 +214,13 @@ for (const [name, create] of [
 
     test('shares a publication defect without retaining the failed execution', async () => {
       // Arrange: the receiving store fails while publishing success.
-      const inventory = create();
       const pending = pendingResponse();
+      const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+        .mockImplementationOnce(pending.fetcher)
+        .mockResolvedValueOnce(Response.json({
+          data: { item: { sku: 'tea', label: 'Tea', quantity: 9 } },
+        }));
+      const inventory = create({ fetcher });
       let failPublication = true;
       const service = {
         ...inventory.service,
@@ -229,7 +230,7 @@ for (const [name, create] of [
           return inventory.service.dispatch(action);
         }),
       };
-      const input = { store: service, variables: { sku: 'tea' }, fetcher: pending.fetcher };
+      const input = { store: service, variables: { sku: 'tea' } };
 
       try {
         // Act: both waiters receive the defect from one execution.
@@ -246,12 +247,7 @@ for (const [name, create] of [
         expect(exits[1]).toEqual(exits[0]);
         expect(inventory.snapshot().api.requests[inventory.read.key(input.variables)]?.status).toBe('failed');
         failPublication = false;
-        expect(await Effect.runPromise(inventory.read.run({
-          ...input,
-          fetcher: async () => Response.json({
-            data: { item: { sku: 'tea', label: 'Tea', quantity: 9 } },
-          }),
-        }))).toEqual({ status: 'succeeded' });
+        expect(await Effect.runPromise(inventory.read.run(input))).toEqual({ status: 'succeeded' });
       } finally {
         await inventory.dispose();
       }
@@ -259,7 +255,14 @@ for (const [name, create] of [
 
     test('waits for cancelled ownership cleanup before starting a new query', async () => {
       // Arrange: cancellation publication is deliberately held at the store boundary.
-      const inventory = create();
+      const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+        .mockImplementationOnce((_url, init) => new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('Aborted.')), { once: true });
+        }))
+        .mockResolvedValueOnce(Response.json({
+          data: { item: { sku: 'tea', label: 'Tea', quantity: 8 } },
+        }));
+      const inventory = create({ fetcher });
       const entered = Deferred.makeUnsafe<void>();
       const cleanup = Deferred.makeUnsafe<void>();
       const service = {
@@ -272,16 +275,8 @@ for (const [name, create] of [
           return yield* inventory.service.dispatch(action);
         }),
       };
-      const fetcher = vi.fn(async () => Response.json({
-        data: { item: { sku: 'tea', label: 'Tea', quantity: 8 } },
-      }));
-      const input = { store: service, variables: { sku: 'tea' }, fetcher };
-      const first = Effect.runFork(inventory.read.run({
-        ...input,
-        execute: (_variables, signal) => new Promise<never>((_resolve, reject) => {
-          signal.addEventListener('abort', () => reject(new Error('Aborted.')), { once: true });
-        }),
-      }));
+      const input = { store: service, variables: { sku: 'tea' } };
+      const first = Effect.runFork(inventory.read.run(input));
 
       try {
         await Effect.runPromise(Effect.yieldNow);
@@ -291,14 +286,14 @@ for (const [name, create] of [
         await Effect.runPromise(Deferred.await(entered));
         const retry = Effect.runFork(inventory.read.run(input));
         await Effect.runPromise(Effect.yieldNow);
-        expect(fetcher).not.toHaveBeenCalled();
+        expect(fetcher).toHaveBeenCalledTimes(1);
         await Effect.runPromise(Deferred.succeed(cleanup, undefined));
         await Effect.runPromise(Fiber.join(cancellation));
         const result = await Effect.runPromise(Fiber.join(retry));
 
         // Assert: the new caller starts fresh after ownership is released.
         expect(result).toEqual({ status: 'succeeded' });
-        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(fetcher).toHaveBeenCalledTimes(2);
       } finally {
         await Effect.runPromise(Deferred.succeed(cleanup, undefined));
         await Effect.runPromise(Fiber.interrupt(first));
@@ -308,9 +303,9 @@ for (const [name, create] of [
 
     test.each([0, 1])('keeps a query alive when caller %i cancels', async (cancelledCaller) => {
       // Arrange: the original caller and duplicate await a pending response.
-      const inventory = create();
       const pending = pendingResponse();
-      const input = { store: inventory.service, variables: { sku: 'tea' }, fetcher: pending.fetcher };
+      const inventory = create({ fetcher: pending.fetcher });
+      const input = { store: inventory.service, variables: { sku: 'tea' } };
       const first = Effect.runFork(inventory.read.run(input));
       const second = Effect.runFork(inventory.read.run(input));
       const leaving = cancelledCaller === 0 ? first : second;
@@ -339,15 +334,19 @@ for (const [name, create] of [
 
     test('aborts a shared query when its last waiter cancels', async () => {
       // Arrange: transport waits for its abort signal.
-      const inventory = create();
       let signal: AbortSignal | null | undefined;
-      const fetcher = vi.fn((_url: string, init: RequestInit) => {
-        signal = init.signal;
-        return new Promise<Response>((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('Aborted.')), { once: true });
-        });
-      });
-      const input = { store: inventory.service, variables: { sku: 'tea' }, fetcher };
+      const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+        .mockImplementationOnce((_url, init) => {
+          signal = init.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new Error('Aborted.')), { once: true });
+          });
+        })
+        .mockResolvedValueOnce(Response.json({
+          data: { item: { sku: 'tea', label: 'Tea', quantity: 9 } },
+        }));
+      const inventory = create({ fetcher });
+      const input = { store: inventory.service, variables: { sku: 'tea' } };
       const first = Effect.runFork(inventory.read.run(input));
       const second = Effect.runFork(inventory.read.run(input));
 
@@ -359,18 +358,13 @@ for (const [name, create] of [
         expect(signal?.aborted).toBe(false);
         await Effect.runPromise(Fiber.interrupt(second));
         const afterCancellation = inventory.snapshot();
-        const retry = await Effect.runPromise(inventory.read.run({
-          ...input,
-          fetcher: async () => Response.json({
-            data: { item: { sku: 'tea', label: 'Tea', quantity: 9 } },
-          }),
-        }));
+        const retry = await Effect.runPromise(inventory.read.run(input));
 
         // Assert: abort releases both local work and reducer ownership.
         expect(signal?.aborted).toBe(true);
         expect(afterCancellation.api.requests[inventory.read.key(input.variables)]?.status).toBe('cancelled');
         expect(retry).toEqual({ status: 'succeeded' });
-        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(fetcher).toHaveBeenCalledTimes(2);
       } finally {
         await Effect.runPromise(Fiber.interrupt(first));
         await Effect.runPromise(Fiber.interrupt(second));
@@ -380,11 +374,11 @@ for (const [name, create] of [
 
     test('starts fresh transport after a shared query settles', async () => {
       // Arrange: a completed query must not become a response cache.
-      const inventory = create();
       const fetcher = vi.fn(async () => Response.json({
         data: { item: { sku: 'tea', label: 'Tea', quantity: 8 } },
       }));
-      const input = { store: inventory.service, variables: { sku: 'tea' }, fetcher };
+      const inventory = create({ fetcher });
+      const input = { store: inventory.service, variables: { sku: 'tea' } };
 
       try {
         await Effect.runPromise(inventory.read.run(input));
@@ -420,17 +414,16 @@ for (const [name, create] of [
 
     test('normalizes a decoded read without tracker dependencies', async () => {
       // Arrange: the transport boundary returns an inventory response.
-      const inventory = create();
       const fetcher = vi.fn(async () => Response.json({
         data: { item: { sku: 'tea', label: 'Tea', quantity: 8 } },
       }));
+      const inventory = create({ fetcher });
 
       try {
         // Act: execute a query with explicit registered cases.
         const result = await Effect.runPromise(inventory.read.run({
           store: inventory.service,
           variables: { sku: 'tea' },
-          fetcher,
         }));
 
         // Assert: normalized data and request metadata belong to this store.
@@ -446,14 +439,15 @@ for (const [name, create] of [
 
     test('surfaces malformed transport data without merging entities', async () => {
       // Arrange: the boundary returns a quantity of the wrong type.
-      const inventory = create();
+      const inventory = create({
+        fetcher: async () => Response.json({ data: { item: { sku: 'tea', label: 'Tea', quantity: 'eight' } } }),
+      });
 
       try {
         // Act: runtime decoding rejects the response.
         const result = await Effect.runPromise(inventory.read.run({
           store: inventory.service,
           variables: { sku: 'tea' },
-          fetcher: async () => Response.json({ data: { item: { sku: 'tea', label: 'Tea', quantity: 'eight' } } }),
         }));
 
         // Assert: an explicit failed outcome is retained in request metadata.
@@ -589,9 +583,9 @@ for (const [name, create] of [
 
     test('rejects pending query metadata without a local execution', async () => {
       // Arrange: explicit request metadata already owns this key.
-      const inventory = create();
       const variables = { sku: 'tea' };
       const fetcher = vi.fn(async () => Response.json({ data: {} }));
+      const inventory = create({ fetcher });
 
       try {
         await Effect.runPromise(inventory.service.dispatch(inventory.read.actions.started({
@@ -605,7 +599,6 @@ for (const [name, create] of [
         const result = Effect.runPromise(inventory.read.run({
           store: inventory.service,
           variables,
-          fetcher,
         }));
 
         // Assert: nonexistent work cannot be shared or silently skipped.

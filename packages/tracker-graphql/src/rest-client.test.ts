@@ -11,6 +11,10 @@ import {
 } from 'vitest';
 
 import {
+  decodeRestPeople,
+  decodeRestPersonUpdate,
+  decodeRestTask,
+  decodeRestTrackerPage,
   fetchRestPeople,
   fetchRestTaskById,
   fetchRestTrackerPage,
@@ -53,6 +57,45 @@ beforeEach(() => {
 const fetcher = (url: string, init: RequestInit) => handleRestRequest(new Request(url, init));
 
 describe('REST client', () => {
+  test('rejects an invalid people collection', () => {
+    // Arrange: the people response contains an invalid domain entity.
+    const people = [{ id: 'person', name: 'Pat Person' }];
+
+    // Act / Assert: the reusable decoder rejects the malformed collection.
+    expect(() => decodeRestPeople(people)).toThrow('Invalid REST response for people.');
+  });
+
+  test('decodes an update only when its person ID matches', () => {
+    // Arrange: the server returned a valid person for a different ID.
+    const person = { id: 'other', name: 'Pat Person', initials: 'PP', role: 'Designer' };
+
+    // Act / Assert: the reusable decoder rejects the mismatched response.
+    expect(() => decodeRestPersonUpdate(person, 'person')).toThrow('Invalid REST response for person update.');
+  });
+
+  test('decodes an update only when its task ID matches', () => {
+    // Arrange: the server returned a valid task for a different ID.
+    const task = {
+      id: 'other', projectId: 'project', assigneeId: null, title: 'Task',
+      status: 'todo', priority: 'medium', description: 'Detail',
+    };
+
+    // Act / Assert: the reusable decoder rejects the mismatched response.
+    expect(() => decodeRestTask(task, 'task')).toThrow('Invalid REST response for task detail.');
+  });
+
+  test('rejects a page whose cursor does not advance', () => {
+    // Arrange: a structurally valid response repeats its prior cursor.
+    const page = {
+      projects: [], people: [], tasks: [],
+      pageInfo: { endCursor: 'one', hasNextPage: true },
+      totalCount: 0, statusCounts: [],
+    };
+
+    // Act / Assert: the reusable decoder rejects the non-advancing page.
+    expect(() => decodeRestTrackerPage(page, 'one')).toThrow('Invalid REST response: non-advancing cursor page.');
+  });
+
   test('decodes task pages and REST people', async () => {
     // Arrange: use the real REST handler at the network boundary.
 

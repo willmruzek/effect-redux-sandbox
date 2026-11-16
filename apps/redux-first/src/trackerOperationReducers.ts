@@ -11,38 +11,14 @@ import {
   createTrackerApiState,
   type TrackerApiState
 } from './trackerApiDefinition';
-import { trackerOperations } from './trackerOperations';
+import type { createTrackerOperations } from './trackerOperations';
 
-const tracker = createSlice({
+export const createTrackerOperationReducer = (trackerOperations: ReturnType<typeof createTrackerOperations>) => createSlice({
   name: 'trackerOperations',
   initialState: createTrackerApiState,
   reducers: {},
 
   extraReducers: (builder) => {
-    const peopleRequest = trackerOperations.peopleRequest.reducers({
-      onStarted: (state, payload) => {
-        if (state.sourceMode !== 'mixed')
-          return;
-        state.peopleRequest = { status: 'loading', requestId: payload.requestId };
-      },
-
-      onConfirmed: (state, _payload, people) => {
-        for (const person of people) {
-          if (state.personWrites[person.id]?.status !== 'saving')
-            state.people[person.id] = person;
-        }
-        state.peopleRequest = { status: 'complete' };
-      },
-
-      onFailed: (state, payload) => {
-        state.peopleRequest = { status: 'error', ...payload };
-      }
-    });
-
-    builder.addCase(trackerOperations.peopleRequest.actions.started, peopleRequest.started);
-    builder.addCase(trackerOperations.peopleRequest.actions.confirmed, peopleRequest.confirmed);
-    builder.addCase(trackerOperations.peopleRequest.actions.failed, peopleRequest.failed);
-
     const taskDetailWrite = trackerOperations.taskDetailWrite.reducers({
       onStarted: (state, payload) => {
         const task = state.tasks[payload.taskId];
@@ -227,66 +203,5 @@ const tracker = createSlice({
     builder.addCase(trackerOperations.priority.actions.confirmed, priority.confirmed);
     builder.addCase(trackerOperations.priority.actions.failed, priority.failed);
 
-    const personName = trackerOperations.personName.reducers({
-      onStarted: (state, payload) => {
-        const person = state.people[payload.personId];
-
-        if (
-          !person ||
-          state.sourceMode === 'graphql'
-        )
-          return;
-
-        state.personWrites[payload.personId] = {
-          status: 'saving',
-          requestId: payload.requestId,
-          original: person.name,
-        };
-        person.name = payload.name;
-      },
-
-      onConfirmed: (state, payload, person) => {
-        state.people[payload.personId] = person;
-        delete state.personWrites[payload.personId];
-      },
-
-      onFailed: (state, payload, pending) => {
-        const person = state.people[payload.personId];
-
-        if (!person)
-          return;
-
-        person.name = pending.original;
-        state.personWrites[payload.personId] = { status: 'error', error: payload.error };
-      }
-    });
-
-    builder.addCase(trackerOperations.personName.actions.started, personName.started);
-    builder.addCase(trackerOperations.personName.actions.confirmed, personName.confirmed);
-    builder.addCase(trackerOperations.personName.actions.failed, personName.failed);
-
-    const assignee = trackerOperations.assignee.reducers(
-      createOptimisticFieldReducers<TrackerApiState, TaskFieldInput<string | null>>()({
-        field: 'assigneeId',
-        value: (input) => input.value,
-        canStart: (state, input) => state.deletions[input.taskId]?.status !== 'saving',
-
-        select: (state, input) => {
-          const entity = state.tasks[input.taskId];
-
-          return entity ? {
-            entity,
-            writes: state.assigneeWrites,
-            id: input.taskId,
-          } : undefined;
-        },
-      }),
-    );
-
-    builder.addCase(trackerOperations.assignee.actions.started, assignee.started);
-    builder.addCase(trackerOperations.assignee.actions.confirmed, assignee.confirmed);
-    builder.addCase(trackerOperations.assignee.actions.failed, assignee.failed);
   },
-});
-
-export const trackerOperationReducer = tracker.reducer;
+}).reducer;

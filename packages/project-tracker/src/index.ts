@@ -315,11 +315,10 @@ export type FetchPage = (input: Readonly<{
 export type LoadOptions = {
   readonly fail?: boolean;
   readonly query?: Partial<TaskQuery>;
-  readonly fetchPage?: FetchPage;
   readonly sourceMode?: TrackerSourceMode;
 };
 
-export type RefreshOptions = Pick<LoadOptions, 'fail' | 'fetchPage' | 'sourceMode'>;
+export type RefreshOptions = Pick<LoadOptions, 'fail' | 'sourceMode'>;
 
 export type LoadStarted = {
   readonly requestId: string;

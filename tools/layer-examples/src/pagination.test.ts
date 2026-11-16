@@ -1,7 +1,7 @@
 import {
   createCursorPagination as createReduxPagination,
   createInvalidationRegistry as createReduxInvalidation,
-  createRequestApi as createReduxApi,
+  createGraphqlApi as createReduxApi,
   type InvalidationState,
   type InvalidationTag,
   type RequestApiState,
@@ -9,7 +9,7 @@ import {
 import {
   createCursorPagination as createEffectPagination,
   createInvalidationRegistry as createEffectInvalidation,
-  createRequestApi as createEffectApi,
+  createGraphqlApi as createEffectApi,
 } from '@repo/effect-store-toolkit';
 import { Effect, Fiber } from 'effect';
 import { describe, expect, test, vi } from 'vitest';
@@ -18,6 +18,23 @@ type Page = {
   readonly ids: readonly string[];
   readonly next: string | null;
 };
+
+function decodePage(data: unknown): Page {
+  if (
+    typeof data !== 'object' || data === null ||
+    !('ids' in data) || !Array.isArray(data.ids) ||
+    !('next' in data) || (data.next !== null && typeof data.next !== 'string')
+  )
+    throw new Error('Invalid page.');
+
+  const ids: string[] = [];
+  for (const id of data.ids) {
+    if (typeof id !== 'string')
+      throw new Error('Invalid page ID.');
+    ids.push(id);
+  }
+  return { ids, next: data.next };
+}
 
 type Pagination = {
   readonly identity: string;
@@ -127,16 +144,26 @@ describe.each([
   test('shares generated query execution with an external query caller', async () => {
     // Arrange: install both reducers on one store with one stable service.
     type QueryState = State & { readonly api: RequestApiState };
+    let finish: (page: Page) => void = () => {
+      throw new Error('Request not started.');
+    };
+    const execute = vi.fn(() => new Promise<Page>((resolve) => {
+      finish = resolve;
+    }));
     const api = createApi({
       name: 'items',
+      endpoint: '/graphql',
       getState: (state: QueryState) => state.api,
       state: (state) => state.api,
       operations: (builder) => ({
         page: builder.query('page', {
-          decode: (_data: unknown, variables: { readonly after: string | null }): Page => ({
-            ids: [variables.after ?? 'first'],
-            next: null,
-          }),
+          document: 'query Page { page }',
+          transport: async (variables: { readonly after: string | null }) => {
+            void variables;
+            const page = await execute();
+            return { status: 'received', read: async () => page };
+          },
+          decode: decodePage,
           normalize: (page: Page) => page,
         }),
       }),
@@ -159,13 +186,7 @@ describe.each([
         state = api.reducer(pagination.reducer(state, action), action);
       }),
     };
-    let finish: (page: Page) => void = () => {
-      throw new Error('Request not started.');
-    };
-    const execute = vi.fn(() => new Promise<Page>((resolve) => {
-      finish = resolve;
-    }));
-    const queryInput = { store, variables: { after: 'one' }, execute };
+    const queryInput = { store, variables: { after: 'one' } };
     const external = Effect.runPromise(api.operations.page.run(queryInput));
 
     // Act: pagination joins the same generated request.
@@ -175,7 +196,6 @@ describe.each([
       query: (after) => api.operations.page.runWithResult({
         store,
         variables: { after },
-        execute,
       }),
     }));
     finish({ ids: ['new'], next: null });
@@ -191,12 +211,11 @@ describe.each([
     const first = Effect.runPromise(pagination.refresh({
       store,
       identity: 'a',
-      query: (after) => api.operations.page.runWithResult({ store, variables: { after }, execute }),
+      query: (after) => api.operations.page.runWithResult({ store, variables: { after } }),
     }));
     const second = Effect.runPromise(api.operations.page.run({
       store,
       variables: { after: null },
-      execute,
     }));
     finish({ ids: ['fresh'], next: null });
     const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
@@ -207,7 +226,10 @@ describe.each([
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
-  function setupFenced(invalidateBeforePageCommit = false) {
+  function setupFenced(
+    invalidateBeforePageCommit = false,
+    execute: () => Promise<Page> = async () => ({ ids: ['new'], next: 'two' }),
+  ) {
     type QueryState = State & {
       readonly api: RequestApiState;
       readonly invalidation: InvalidationState<'List' | 'Item'>;
@@ -220,13 +242,18 @@ describe.each([
     });
     const api = createApi({
       name: 'items',
+      endpoint: '/graphql',
       state: (state: QueryState) => state.api,
       getState: (state) => state.api,
       operations: (builder) => ({
         page: builder.query('page', {
-          decode: (data: unknown, variables: { readonly after: string | null }): Page => ({
-            ids: data === null || variables.after === null ? [] : [variables.after], next: null,
-          }),
+          document: 'query Page { page }',
+          transport: async (variables: { readonly after: string | null }) => {
+            void variables;
+            const page = await execute();
+            return { status: 'received', read: async () => page };
+          },
+          decode: decodePage,
           normalize: (page: Page) => page,
           provides: {
             registry,
@@ -279,7 +306,6 @@ describe.each([
 
   test('keeps a shared generated query alive when its pagination waiter is interrupted', async () => {
     // Arrange: pagination starts a fenced query that another caller shares.
-    const { api, pagination, store, snapshot } = setupFenced();
     let finish: (page: Page) => void = () => { throw new Error('Request did not start.'); };
     let notifyStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
     const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
@@ -287,6 +313,7 @@ describe.each([
       finish = resolve;
       notifyStarted();
     }));
+    const { api, pagination, store, snapshot } = setupFenced(false, execute);
     const paginated = Effect.runFork(pagination.next({
       store,
       identity: 'a',
@@ -294,11 +321,10 @@ describe.each([
         store,
         variables: { after },
         fence: { identity: pagination.key(request.identity), requestId: request.requestId },
-        execute,
       }),
     }));
     await started;
-    const external = Effect.runFork(api.operations.page.run({ store, variables: { after: 'one' }, execute }));
+    const external = Effect.runFork(api.operations.page.run({ store, variables: { after: 'one' } }));
     await Effect.runPromise(Effect.yieldNow);
 
     // Act: interrupt only pagination and complete the shared transport.
@@ -327,7 +353,6 @@ describe.each([
         store,
         variables: { after },
         fence: { identity: pagination.key(request.identity), requestId: request.requestId },
-        execute: async () => ({ ids: ['new'], next: 'two' }),
       }),
     }));
 
@@ -350,7 +375,6 @@ describe.each([
         store,
         variables: { after },
         fence: { identity: pagination.key(request.identity), requestId: request.requestId },
-        execute: async () => ({ ids: ['new'], next: 'two' }),
       }),
     }));
 
@@ -385,11 +409,14 @@ describe.each([
 
   test('does not replace a stale window when the refresh is invalidated in flight', async () => {
     // Arrange: start a first-page refresh after the established chain becomes stale.
-    const { api, pagination, registry, store, snapshot } = setupFenced();
-    await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'List' }] }));
     let finish: (page: Page) => void = () => { throw new Error('Refresh did not start.'); };
     let notifyStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
     const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const { api, pagination, registry, store, snapshot } = setupFenced(false, () => new Promise<Page>((resolve) => {
+      finish = resolve;
+      notifyStarted();
+    }));
+    await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'List' }] }));
     const refresh = Effect.runPromise(pagination.refresh({
       store,
       identity: 'a',
@@ -397,10 +424,6 @@ describe.each([
         store,
         variables: { after },
         fence: { identity: pagination.key(request.identity), requestId: request.requestId },
-        execute: () => new Promise<Page>((resolve) => {
-          finish = resolve;
-          notifyStarted();
-        }),
       }),
     }));
     await started;
@@ -444,16 +467,25 @@ describe.each([
   test('does not expose failed or superseded generated results as successful pages', async () => {
     // Arrange: different variables compete for one generated query scope.
     type QueryState = { readonly api: RequestApiState };
+    let finish: (page: Page) => void = () => {
+      throw new Error('Request not started.');
+    };
     const api = createApi({
       name: 'results',
+      endpoint: '/graphql',
       state: (state: QueryState) => state.api,
       getState: (state) => state.api,
       operations: (builder) => ({
         page: builder.query('page', {
-          decode: (_data: unknown, variables: { readonly id: string }): Page => ({
-            ids: [variables.id],
-            next: null,
-          }),
+          document: 'query Page { page }',
+          transport: async (variables: { readonly id: string }) => {
+            if (variables.id === 'new')
+              throw new Error('Offline');
+
+            const page = await new Promise<Page>((resolve) => { finish = resolve; });
+            return { status: 'received', read: async () => page };
+          },
+          decode: decodePage,
           normalize: (page: Page) => page,
           scope: () => 'active',
         }),
@@ -466,20 +498,15 @@ describe.each([
         state = api.reducer(state, action);
       }),
     };
-    let finish: (page: Page) => void = () => {
-      throw new Error('Request not started.');
-    };
     const old = Effect.runPromise(api.operations.page.runWithResult({
       store,
       variables: { id: 'old' },
-      execute: () => new Promise<Page>((resolve) => { finish = resolve; }),
     }));
 
     // Act: a newer request fails before the old response arrives.
     const failed = await Effect.runPromise(api.operations.page.runWithResult({
       store,
       variables: { id: 'new' },
-      execute: async () => { throw new Error('Offline'); },
     }));
     finish({ ids: ['stale'], next: null });
     const stale = await old;

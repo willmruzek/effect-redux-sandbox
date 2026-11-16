@@ -8,14 +8,33 @@ export type RequestStatus =
     readonly requestId: string;
   }
   | {
-    readonly status: 'failed' | 'cancelled';
+    readonly status: 'failed' | 'cancelled' | 'postCommitError';
     readonly requestId: string;
     readonly error: string;
+    readonly serverMayHaveCommitted?: true;
+    readonly rollback?: IncompleteRollback;
   };
 
+export type IncompleteRollback = {
+  readonly status: 'incomplete';
+  readonly missingTargets: readonly {
+    readonly table: string;
+    readonly id: string;
+    readonly incarnation: string;
+    readonly field: string;
+  }[];
+  readonly error?: string;
+};
+
 export type RequestOutcome =
-  | { readonly status: 'succeeded' | 'skipped' | 'superseded' }
-  | { readonly status: 'failed'; readonly error: string };
+  | { readonly status: 'succeeded' | 'superseded' }
+  | { readonly status: 'skipped'; readonly reason?: 'conflict' }
+  | {
+    readonly status: 'failed';
+    readonly error: string;
+    readonly serverMayHaveCommitted?: true;
+    readonly rollback?: IncompleteRollback;
+  };
 
 type RequestInput = { readonly variables: object };
 

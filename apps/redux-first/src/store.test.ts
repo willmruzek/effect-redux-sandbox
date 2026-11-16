@@ -17,6 +17,7 @@ import {
   createAppStore as makeAppStore,
   createTask,
   deleteTask,
+  loadPeople,
   loadMoreTasks,
   saveTaskDetails,
   saveStatus,
@@ -27,8 +28,9 @@ import {
   trackerActions
 } from './store';
 import { ReduxStore } from './reduxStore';
-import { taskPagination } from './trackerApiReducers';
-import { trackerInvalidation } from './trackerInvalidation';
+import { TrackerApiStore } from './trackerApiStore';
+import { createTestPageTransport } from './testPageTransport';
+import type { TrackerApiTransportOptions } from './api';
 
 import { createTrackerDatabase } from '@repo/project-tracker/database';
 import { createLocalActions } from '@repo/project-tracker';
@@ -61,12 +63,29 @@ beforeEach(() => {
 
 const runtimes: ManagedRuntime.ManagedRuntime<never, never>[] = [];
 
-function createAppStore(initial?: TrackerState) {
+function createAppStore(
+  initial?: TrackerState,
+  fetchPage?: FetchPage,
+  transportOptions: TrackerApiTransportOptions = {},
+) {
   const runtime = ManagedRuntime.make(Layer.empty);
 
   runtimes.push(runtime);
 
-  return makeAppStore(runtime, initial);
+  return makeAppStore(
+    runtime,
+    initial,
+    {
+      ...transportOptions,
+      ...(fetchPage ? createTestPageTransport(fetchPage) : {}),
+    },
+  );
+}
+
+function getTrackerServices(store: ReturnType<typeof makeAppStore<never, never>>) {
+  return store.dispatch(Effect.gen(function*() {
+    return yield* ReduxStore;
+  }));
 }
 
 beforeEach(() => {
@@ -86,19 +105,99 @@ afterEach(async () => {
 });
 
 describe('Redux project tracker', () => {
+  test('loads mixed-mode people through the configured REST API', async () => {
+    // Arrange: configure a REST transport that uses the shared test handler.
+    const runtime = ManagedRuntime.make(Layer.empty);
+    runtimes.push(runtime);
+    const restFetcher = vi.fn((url: string, init: RequestInit) => {
+      const request = new Request(new URL(url, 'http://localhost'), init);
+
+      return handleRestRequest(request);
+    });
+    const store = makeAppStore(runtime, undefined, { restFetcher });
+
+    // Act: select mixed mode, which loads people from REST.
+    await store.dispatch(selectSourceMode('mixed'));
+
+    // Assert: the centrally configured REST transport handles the people route.
+    expect(restFetcher).toHaveBeenCalledWith(
+      '/api/people',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(store.getState().peopleRequest.status).toBe('complete');
+    expect(store.getState().people.mara).toBeDefined();
+  });
+
+  test('settles a shared people request after mixed mode is reselected', async () => {
+    // Arrange: keep the configured REST request pending until a second caller joins.
+    let finishPeople: (response: Response) => void = () => {
+      throw new Error('People request did not start.');
+    };
+    let markPeopleStarted: () => void = () => {
+      throw new Error('People request start signal was not initialized.');
+    };
+    const peopleStarted = new Promise<void>((resolve) => {
+      markPeopleStarted = resolve;
+    });
+    const restFetcher = vi.fn(() => new Promise<Response>((resolve) => {
+      finishPeople = resolve;
+      markPeopleStarted();
+    }));
+    const store = createAppStore(undefined, undefined, { restFetcher });
+    const firstLoad = store.dispatch(selectSourceMode('mixed'));
+
+    await peopleStarted;
+
+    // Act: leave and re-enter mixed mode while the people query is still running.
+    store.dispatch(trackerActions.sourceModeSelected('graphql'));
+    store.dispatch(trackerActions.sourceModeSelected('mixed'));
+    const joinedLoad = store.dispatch(loadPeople());
+    finishPeople(Response.json([{
+      id: 'mara',
+      name: 'Mara Voss',
+      initials: 'MV',
+      role: 'Designer',
+    }]));
+    await Promise.all([firstLoad, joinedLoad]);
+
+    // Assert: the joined response still completes the app-owned people state.
+    expect(restFetcher).toHaveBeenCalledOnce();
+    expect(store.getState().peopleRequest.status).toBe('complete');
+    expect(store.getState().people.mara?.name).toBe('Mara Voss');
+  });
+
+  test('records mixed-mode people failures from the configured REST API', async () => {
+    // Arrange: make the configured people endpoint return an explicit error.
+    const restFetcher = vi.fn(async () => Response.json(
+      { error: 'People unavailable' },
+      { status: 503 },
+    ));
+    const store = createAppStore(undefined, undefined, { restFetcher });
+
+    // Act: select mixed mode, which loads people from REST.
+    await store.dispatch(selectSourceMode('mixed'));
+
+    // Assert: the REST operation publishes its failure through people state.
+    expect(store.getState().peopleRequest).toMatchObject({
+      status: 'error',
+      error: 'REST request failed (503). People unavailable',
+    });
+  });
+
   test('invalidates the hydrated task chain after an injected status save without refreshing', async () => {
     // Arrange: the initial task page is explicitly seeded fresh.
     const store = createAppStore();
+    const services = await getTrackerServices(store);
     const identity = store.getState().pagination.identity;
     const persist = vi.fn(async ({ taskId, value }: FieldWrite<TaskStatus>) => ({ taskId, value }));
 
-    expect(taskPagination.selectFreshness(store.getState(), identity)).toBe('fresh');
+    expect(services.taskPagination.selectFreshness(store.getState(), identity)).toBe('fresh');
 
     // Act: save a task through the injected persistence callback.
     await store.dispatch(saveStatus({ taskId: 'ATL-01', value: 'done', persist }));
 
     // Assert: the chain is stale without an automatic refresh.
-    expect(taskPagination.selectFreshness(store.getState(), identity)).toBe('stale');
+    expect(services.taskPagination.selectFreshness(store.getState(), identity)).toBe('stale');
     expect(store.getState().tasks['ATL-01']?.status).toBe('done');
     expect(persist).toHaveBeenCalledOnce();
     expect(fetch).not.toHaveBeenCalled();
@@ -106,21 +205,21 @@ describe('Redux project tracker', () => {
 
   test('discards a page whose newly discovered task was invalidated while loading', async () => {
     // Arrange: keep a generated page request pending.
-    const store = createAppStore();
-    const before = store.getState();
     let finish: (page: TaskPage) => void = () => { throw new Error('Page did not start.'); };
     let markStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
-    const read = store.dispatch(loadMoreTasks({
-      fetchPage: () => new Promise<TaskPage>((resolve) => {
-        finish = resolve;
-        markStarted();
-      }),
-    }));
+    const fetchPage: FetchPage = () => new Promise<TaskPage>((resolve) => {
+      finish = resolve;
+      markStarted();
+    });
+    const store = createAppStore(undefined, fetchPage);
+    const services = await getTrackerServices(store);
+    const before = store.getState();
+    const read = store.dispatch(loadMoreTasks());
     await started;
 
     // Act: invalidate an entity that is only known when the page arrives.
-    store.dispatch(trackerInvalidation.actions.invalidate({ tags: [{ type: 'Task', id: 'new-task' }] }));
+    store.dispatch(services.invalidation.actions.invalidate({ tags: [{ type: 'Task', id: 'new-task' }] }));
     finish({
       projects: [],
       people: [],
@@ -137,7 +236,7 @@ describe('Redux project tracker', () => {
     expect(after.result).toEqual(before.result);
     expect(after.pagination.cursor).toBe(before.pagination.cursor);
     expect(after.request.status).toBe('idle');
-    expect(taskPagination.selectFreshness(after, before.pagination.identity)).toBe('stale');
+    expect(services.taskPagination.selectFreshness(after, before.pagination.identity)).toBe('stale');
     expect(Object.values(after.api.requests).some((request) => request.status === 'superseded')).toBe(true);
   });
 
@@ -146,18 +245,19 @@ describe('Redux project tracker', () => {
     async (sourceMode) => {
       // Arrange: load the current source mode and its assigned people.
       const store = createAppStore();
+      const services = await getTrackerServices(store);
       await store.dispatch(selectSourceMode(sourceMode));
       const identity = store.getState().pagination.identity;
       const requestsBeforeRename = vi.mocked(fetch).mock.calls.length;
 
-      expect(taskPagination.selectFreshness(store.getState(), identity)).toBe('fresh');
+      expect(services.taskPagination.selectFreshness(store.getState(), identity)).toBe('fresh');
 
       // Act: rename a person without refreshing task pages.
       await store.dispatch(renamePerson({ personId: 'mara', name: 'Mara Sato' }));
 
       // Assert: the visible chain is stale across transport modes.
       expect(store.getState().people.mara?.name).toBe('Mara Sato');
-      expect(taskPagination.selectFreshness(store.getState(), identity)).toBe('stale');
+      expect(services.taskPagination.selectFreshness(store.getState(), identity)).toBe('stale');
       expect(vi.mocked(fetch).mock.calls.length).toBe(requestsBeforeRename + 1);
     },
   );
@@ -223,16 +323,12 @@ describe('Redux project tracker', () => {
 
   test('ignores a GraphQL page that completes after switching to REST', async () => {
     // Arrange: keep an older GraphQL response pending while REST becomes active.
-    const store = createAppStore();
     let resolveStalePage: ((page: TaskPage) => void) | undefined;
     const stalePage = new Promise<TaskPage>((resolve) => {
       resolveStalePage = resolve;
     });
-    const staleRead = store.dispatch(loadMoreTasks({
-      query: { search: 'stale' },
-
-      fetchPage: async () => stalePage,
-    }));
+    const store = createAppStore(undefined, async () => stalePage);
+    const staleRead = store.dispatch(loadMoreTasks({ query: { search: 'stale' } }));
 
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -487,28 +583,29 @@ describe('Redux project tracker', () => {
 
   test('merges pending query intent and ignores a superseded failure', async () => {
     // Arrange: the project request stays pending when another filter changes.
-    const store = createAppStore();
     let reject: (error: Error) => void = () => {
       throw new Error('Request did not start');
     };
-    const old = store.dispatch(loadMoreTasks({
-      query: { projectId: 'atlas' },
+    const fetchPage = vi.fn<FetchPage>(async ({ query }) => {
+      if (query.status === 'done')
+        return {
+          projects: [],
+          people: [],
+          tasks: [],
+          pageInfo: { endCursor: null, hasNextPage: false },
+          totalCount: 0,
+          statusCounts: [],
+        };
 
-      fetchPage: () => new Promise<TaskPage>((_resolve, fail) => {
+      return new Promise<TaskPage>((_resolve, fail) => {
         reject = fail;
-      }),
-    }));
-    const fetchPage = vi.fn<FetchPage>(async () => ({
-      projects: [],
-      people: [],
-      tasks: [],
-      pageInfo: { endCursor: null, hasNextPage: false },
-      totalCount: 0,
-      statusCounts: [],
-    }));
+      });
+    });
+    const store = createAppStore(undefined, fetchPage);
+    const old = store.dispatch(loadMoreTasks({ query: { projectId: 'atlas' } }));
 
     // Act: change status before the project request fails.
-    await store.dispatch(loadMoreTasks({ query: { status: 'done' }, fetchPage }));
+    await store.dispatch(loadMoreTasks({ query: { status: 'done' } }));
 
     const current = store.getState();
 
@@ -526,15 +623,9 @@ describe('Redux project tracker', () => {
 
   test('ignores a late response from a superseded backend query', async () => {
     // Arrange: the first request waits at the HTTP boundary.
-    const store = createAppStore();
     let resolve: (page: TaskPage) => void = () => {
       throw new Error('Request did not start');
     };
-    const old = store.dispatch(loadMoreTasks({
-      fetchPage: () => new Promise<TaskPage>((complete) => {
-        resolve = complete;
-      }),
-    }));
     const page: TaskPage = {
       projects: [],
       people: [],
@@ -543,13 +634,16 @@ describe('Redux project tracker', () => {
       totalCount: 0,
       statusCounts: []
     };
+    const fetchPage: FetchPage = ({ query }) => query.search
+      ? Promise.resolve(page)
+      : new Promise<TaskPage>((complete) => {
+        resolve = complete;
+      });
+    const store = createAppStore(undefined, fetchPage);
+    const old = store.dispatch(loadMoreTasks());
 
     // Act: replace the query, then let its earlier request finish.
-    await store.dispatch(loadMoreTasks({
-      query: { search: 'new query' },
-
-      fetchPage: async () => page
-    }));
+    await store.dispatch(loadMoreTasks({ query: { search: 'new query' } }));
 
     const current = store.getState();
 
@@ -564,24 +658,29 @@ describe('Redux project tracker', () => {
 
   test('retries the same backend cursor after a failed append', async () => {
     // Arrange: obtain a real first-page cursor.
-    const store = createAppStore();
-
-    await store.dispatch(loadMoreTasks());
-
-    const cursor = store.getState().result.pageInfo.endCursor;
+    let useTransport = false;
     let fail = true;
     const fetchPage = vi.fn<FetchPage>(async (input) => {
+      if (!useTransport)
+        return fetchTaskPage(input);
       if (fail)
         throw new Error('Temporary HTTP failure');
 
       return fetchTaskPage(input);
     });
+    const store = createAppStore(undefined, fetchPage);
+
+    await store.dispatch(loadMoreTasks());
+
+    const cursor = store.getState().result.pageInfo.endCursor;
+    fetchPage.mockClear();
 
     // Act: fail once, then retry with the same workflow.
-    await store.dispatch(loadMoreTasks({ fetchPage }));
+    useTransport = true;
+    await store.dispatch(loadMoreTasks());
     expect(store.getState().result.ids).toHaveLength(20);
     fail = false;
-    await store.dispatch(loadMoreTasks({ fetchPage }));
+    await store.dispatch(loadMoreTasks());
 
     // Assert: cursor advances only after success, with no skipped records.
     expect(fetchPage).toHaveBeenNthCalledWith(
@@ -597,11 +696,12 @@ describe('Redux project tracker', () => {
 
   test(
     'ignores stale priority settlement actions while another request owns the field',
-    () => {
+    async () => {
       // Arrange: a pending request owns the optimistic priority.
       const store = createAppStore();
+      const services = await getTrackerServices(store);
 
-      store.dispatch(trackerActions.priorityStarted({
+      store.dispatch(services.operations.priority.actions.started({
         taskId: 'ATL-01',
         value: 'low',
         requestId: 'current'
@@ -610,13 +710,13 @@ describe('Redux project tracker', () => {
       const pending = store.getState();
 
       // Act: old confirmation and failure actions arrive.
-      store.dispatch(trackerActions.priorityConfirmed({
+      store.dispatch(services.operations.priority.actions.confirmed({
         taskId: 'ATL-01',
         value: 'low',
         result: 'medium',
         requestId: 'old'
       }));
-      store.dispatch(trackerActions.priorityFailed({
+      store.dispatch(services.operations.priority.actions.failed({
         taskId: 'ATL-01',
         value: 'low',
         requestId: 'old',
@@ -853,23 +953,17 @@ describe('Redux project tracker', () => {
   });
 
   test('creates a lazy loading Effect requiring the receiving Redux store', () => {
-    // Arrange: observe the fake API boundary.
-    const fetchPage = vi.fn(async () => ({
-      projects: [],
-      people: [],
-      tasks: [],
-      pageInfo: { endCursor: null, hasNextPage: false },
-      totalCount: 0,
-      statusCounts: [],
-    }));
+    // Arrange: observe the global transport boundary.
 
     // Act: describe the request without dispatching it.
-    const program = loadMoreTasks({ fetchPage });
+    const program = loadMoreTasks();
 
     // Assert: constructing the action is lazy and retains its store requirement.
     expect(Effect.isEffect(program)).toBe(true);
-    expectTypeOf(program).toEqualTypeOf<Effect.Effect<void, Error, ReduxStore>>();
-    expect(fetchPage).not.toHaveBeenCalled();
+    expectTypeOf(program).toEqualTypeOf<
+      Effect.Effect<void, Error, ReduxStore | TrackerApiStore>
+    >();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   test('seeds independent relational state for each client', () => {

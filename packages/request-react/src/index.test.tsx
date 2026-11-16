@@ -3,13 +3,13 @@
 import { configureStore } from '@reduxjs/toolkit';
 import { createStore, type StoreService } from '@repo/effect-store';
 import {
-  createRequestApi as createEffectApi,
+  createGraphqlApi as createEffectApi,
   createInvalidationRegistry as createEffectInvalidationRegistry,
   type InvalidationAction as EffectInvalidationAction,
   type RequestActions as EffectRequestActions,
 } from '@repo/effect-store-toolkit';
 import {
-  createRequestApi as createReduxApi,
+  createGraphqlApi as createReduxApi,
   createInvalidationRegistry as createReduxInvalidationRegistry,
   type InvalidationAction as ReduxInvalidationAction,
   type InvalidationState,
@@ -22,7 +22,13 @@ import { createRoot, hydrateRoot, type Root } from 'react-dom/client';
 import { renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, test, vi } from 'vitest';
 
-import { useMutation, useQuery } from '@repo/request-react';
+import {
+  useMutation,
+  useQuery,
+  type IncompleteRollback,
+  type RequestOutcome,
+  type RequestStatus,
+} from '@repo/request-react';
 
 type State = {
   readonly invalidation: InvalidationState<'Item'>;
@@ -43,6 +49,17 @@ type State = {
 };
 
 type Variables = { readonly id: string };
+type Execute = (variables: Variables, signal: AbortSignal) => Promise<string>;
+
+function makeTransport(execute: Execute) {
+  return async (variables: Variables, signal: AbortSignal) => {
+    const value = await execute(variables, signal);
+    return { status: 'received', read: async () => value } satisfies {
+      readonly status: 'received';
+      readonly read: () => Promise<unknown>;
+    };
+  };
+}
 
 const initialState = (): State => ({
   api: { requests: {}, latest: {} },
@@ -65,7 +82,8 @@ function deferred() {
   return { execute, resolve: (value: string) => resolve(value) };
 }
 
-function reduxSetup() {
+function reduxSetup(execute: Execute = async (variables) => variables.id) {
+  const transport = makeTransport(execute);
   const registry = createReduxInvalidationRegistry<State, 'Item'>()({
     name: 'test',
     getState: (state) => state.invalidation,
@@ -73,11 +91,14 @@ function reduxSetup() {
   });
   const api = createReduxApi({
     name: 'test',
+    endpoint: '/graphql',
     state: (state) => state.api,
     getState: (state: State) => state.api,
     operations: (builder) => ({
       query: builder.query('query', {
         ...definition,
+        document: 'query Item { item }',
+        transport,
         scope: () => 'selection',
         provides: {
           registry,
@@ -86,7 +107,11 @@ function reduxSetup() {
           fromResult: () => [],
         },
       }),
-      mutation: builder.mutation('mutation', definition),
+      mutation: builder.mutation('mutation', {
+        ...definition,
+        document: 'mutation Item { item }',
+        transport,
+      }),
     }),
   });
   const redux = configureStore({
@@ -107,7 +132,8 @@ function reduxSetup() {
   };
 }
 
-function effectSetup() {
+function effectSetup(execute: Execute = async (variables) => variables.id) {
+  const transport = makeTransport(execute);
   const registry = createEffectInvalidationRegistry<State, 'Item'>()({
     name: 'test',
     getState: (state) => state.invalidation,
@@ -115,11 +141,14 @@ function effectSetup() {
   });
   const api = createEffectApi({
     name: 'test',
+    endpoint: '/graphql',
     state: (state) => state.api,
     getState: (state: State) => state.api,
     operations: (builder) => ({
       query: builder.query('query', {
         ...definition,
+        document: 'query Item { item }',
+        transport,
         scope: () => 'selection',
         provides: {
           registry,
@@ -128,7 +157,11 @@ function effectSetup() {
           fromResult: () => [],
         },
       }),
-      mutation: builder.mutation('mutation', definition),
+      mutation: builder.mutation('mutation', {
+        ...definition,
+        document: 'mutation Item { item }',
+        transport,
+      }),
     }),
   });
   type Action = EffectRequestActions<typeof api.operations> | EffectInvalidationAction<'Item'>;
@@ -164,6 +197,18 @@ describe.each([
     root = createRoot(container);
   });
 
+  describe('mutation uncertainty types', () => {
+    test('exposes possible server commits on failure outcomes and metadata', () => {
+      // Arrange: derive the failed public outcome and observable status types.
+      type FailedOutcome = Extract<RequestOutcome, { status: 'failed' }>;
+      type FailedStatus = Extract<RequestStatus, { status: 'failed' | 'cancelled' }>;
+
+      // Act / Assert: callers can inspect the same marker on both surfaces.
+      expectTypeOf<FailedOutcome>().toHaveProperty('serverMayHaveCommitted');
+      expectTypeOf<FailedStatus>().toHaveProperty('serverMayHaveCommitted');
+    });
+  });
+
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
@@ -172,14 +217,14 @@ describe.each([
 
   test('useQuery observes freshness without starting a fetch', async () => {
     // Arrange: observe an uninitialized query with a manually controlled transport.
-    const app = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const app = setup(execute);
 
     function Consumer() {
       const { freshness } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       return <p>{freshness}</p>;
@@ -194,7 +239,6 @@ describe.each([
       await Effect.runPromise(app.api.operations.query.run({
         store: app.service,
         variables: { id: 'a' },
-        execute,
       }));
     });
     expect(container.textContent).toBe('fresh');
@@ -213,19 +257,25 @@ describe.each([
 
   test('useQuery remains idle until manually triggered', async () => {
     // Arrange: mount a query with a controlled transport.
-    const app = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const app = setup(execute);
 
     function Consumer() {
       const { request, trigger } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       expectTypeOf(trigger).returns.toEqualTypeOf<Promise<
-        | { readonly status: 'succeeded' | 'skipped' | 'superseded' }
-        | { readonly status: 'failed'; readonly error: string }
+        | { readonly status: 'succeeded' | 'superseded' }
+        | { readonly status: 'skipped'; readonly reason?: 'conflict' }
+        | {
+          readonly status: 'failed';
+          readonly error: string;
+          readonly serverMayHaveCommitted?: true;
+          readonly rollback?: IncompleteRollback;
+        }
       >>();
 
       return <button onClick={() => void trigger()}>{request.status}</button>;
@@ -242,14 +292,14 @@ describe.each([
 
   test('useQuery reports externally started requests for its bound key', async () => {
     // Arrange: mount a query observing one key.
-    const app = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const app = setup(execute);
 
     function Consumer() {
       const { request } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       return <p>{request.status}</p>;
@@ -262,7 +312,6 @@ describe.each([
       await Effect.runPromise(app.api.operations.query.run({
         store: app.service,
         variables: { id: 'a' },
-        execute,
       }));
     });
 
@@ -274,14 +323,14 @@ describe.each([
 
   test('useQuery switches keys without starting transport', async () => {
     // Arrange: mount a query and complete a request for its first key.
-    const app = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const app = setup(execute);
 
     function Consumer({ id }: Readonly<{ id: string }>) {
       const { request } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id }, execute },
+        input: { store: app.service, variables: { id } },
       });
 
       return <p>{request.status}</p>;
@@ -291,7 +340,6 @@ describe.each([
       await Effect.runPromise(app.api.operations.query.run({
         store: app.service,
         variables: { id: 'a' },
-        execute,
       }));
       root.render(<Consumer id="a" />);
     });
@@ -307,15 +355,15 @@ describe.each([
 
   test('useQuery isolates metadata between stores', async () => {
     // Arrange: observe the same key in two separate store instances.
-    const first = setup();
-    const second = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const first = setup(execute);
+    const second = setup(execute);
 
     function Consumer({ app }: Readonly<{ app: ReturnType<typeof setup> }>) {
       const { request } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       return <p>{request.status}</p>;
@@ -328,7 +376,6 @@ describe.each([
       await Effect.runPromise(first.api.operations.query.run({
         store: first.service,
         variables: { id: 'a' },
-        execute,
       }));
     });
 
@@ -340,14 +387,14 @@ describe.each([
 
   test('useQuery displays superseded metadata for an older key', async () => {
     // Arrange: start one query in a shared latest-wins scope.
-    const app = setup();
     const transport = deferred();
+    const app = setup((variables) => variables.id === 'b' ? Promise.resolve('b') : transport.execute());
 
     function Consumer() {
       const { request } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute: transport.execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       return <p>{request.status}</p>;
@@ -359,7 +406,6 @@ describe.each([
       first = Effect.runPromise(app.api.operations.query.run({
         store: app.service,
         variables: { id: 'a' },
-        execute: transport.execute,
       }));
     });
 
@@ -368,7 +414,6 @@ describe.each([
       await Effect.runPromise(app.api.operations.query.run({
         store: app.service,
         variables: { id: 'b' },
-        execute: async () => 'b',
       }));
     });
 
@@ -381,14 +426,14 @@ describe.each([
 
   test('useQuery observes cancellation initiated outside the hook', async () => {
     // Arrange: observe an external query whose transport is pending.
-    const app = setup();
     const transport = deferred();
+    const app = setup(transport.execute);
 
     function Consumer() {
       const { request } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute: transport.execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       return <p>{request.status}</p>;
@@ -398,7 +443,6 @@ describe.each([
     const fiber = Effect.runFork(app.api.operations.query.run({
       store: app.service,
       variables: { id: 'a' },
-      execute: transport.execute,
     }));
     await act(async () => {});
 
@@ -414,15 +458,15 @@ describe.each([
 
   test('useQuery shares pending execution between manual triggers', async () => {
     // Arrange: mount two observers of the same operation and store service.
-    const app = setup();
     const transport = deferred();
+    const app = setup(transport.execute);
     const triggers: Array<() => Promise<unknown>> = [];
 
     function Consumer() {
       const { request, trigger } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute: transport.execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       triggers.push(trigger);
@@ -456,8 +500,8 @@ describe.each([
 
   test('useMutation preserves duplicate-pending skipped outcomes', async () => {
     // Arrange: mount a mutation with a transport that remains pending.
-    const app = setup();
     const transport = deferred();
+    const app = setup(transport.execute);
     let trigger: () => Promise<unknown> = async () => {
       throw new Error('Not mounted');
     };
@@ -466,7 +510,7 @@ describe.each([
       const result = useMutation({
         operation: app.api.operations.mutation,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute: transport.execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       trigger = result.trigger;
@@ -496,8 +540,8 @@ describe.each([
 
   test('useQuery leaves a triggered request running after unmount', async () => {
     // Arrange: start a manual query with a pending transport.
-    const app = setup();
     const transport = deferred();
+    const app = setup(transport.execute);
     let trigger: () => Promise<unknown> = async () => {
       throw new Error('Not mounted');
     };
@@ -506,7 +550,7 @@ describe.each([
       const result = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute: transport.execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       trigger = result.trigger;
@@ -531,8 +575,8 @@ describe.each([
 
   test('useQuery rejects when the receiving service cannot claim a request', async () => {
     // Arrange: install the registry but do not publish request actions.
-    const app = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const app = setup(execute);
     const service = {
       getState: Effect.sync(app.source.getSnapshot),
       dispatch: (action: Parameters<typeof app.service.dispatch>[0]) =>
@@ -546,7 +590,7 @@ describe.each([
       const result = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: service, variables: { id: 'a' }, execute },
+        input: { store: service, variables: { id: 'a' } },
       });
 
       trigger = result.trigger;
@@ -564,8 +608,8 @@ describe.each([
 
   test('useQuery removes its subscription when unmounted', async () => {
     // Arrange: observe a source that records subscription cleanup.
-    const app = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const app = setup(execute);
     const unsubscribe = vi.fn();
     const source = {
       getSnapshot: app.source.getSnapshot,
@@ -583,7 +627,7 @@ describe.each([
       const { request } = useQuery({
         operation: app.api.operations.query,
         source,
-        input: { store: app.service, variables: { id: 'a' }, execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       return <p>{request.status}</p>;
@@ -601,10 +645,10 @@ describe.each([
 
   test('useMutation returns the failure outcome and displays its error', async () => {
     // Arrange: mount a mutation whose transport rejects.
-    const app = setup();
     const execute = vi.fn(async (): Promise<string> => {
       throw new Error('Rejected');
     });
+    const app = setup(execute);
     let trigger: () => Promise<unknown> = async () => {
       throw new Error('Not mounted');
     };
@@ -613,7 +657,7 @@ describe.each([
       const result = useMutation({
         operation: app.api.operations.mutation,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       trigger = result.trigger;
@@ -629,21 +673,21 @@ describe.each([
     });
 
     // Assert: the outcome and shared status retain the failure.
-    expect(outcome).toEqual({ status: 'failed', error: 'Rejected' });
+    expect(outcome).toEqual({ status: 'failed', error: 'Rejected', serverMayHaveCommitted: true });
     expect(container.textContent).toBe('Rejected');
     await app.dispose();
   });
 
   test('useQuery reads the request-scoped snapshot during server rendering', async () => {
     // Arrange: create a fresh, unstarted request-scoped store.
-    const app = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const app = setup(execute);
 
     function Consumer() {
       const { request } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       return <p>{request.status}</p>;
@@ -660,15 +704,15 @@ describe.each([
 
   test('useQuery hydrates the same request-scoped snapshot without transport', async () => {
     // Arrange: render matching server and client stores.
-    const server = setup();
-    const client = setup();
     const execute = vi.fn(async (variables: Variables) => variables.id);
+    const server = setup(execute);
+    const client = setup(execute);
 
     function Consumer({ app }: Readonly<{ app: ReturnType<typeof setup> }>) {
       const { request } = useQuery({
         operation: app.api.operations.query,
         source: app.source,
-        input: { store: app.service, variables: { id: 'a' }, execute },
+        input: { store: app.service, variables: { id: 'a' } },
       });
 
       return <p>{request.status}</p>;

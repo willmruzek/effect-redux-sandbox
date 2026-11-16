@@ -76,7 +76,8 @@ async function requestJson({
   return readResponse(response);
 }
 
-function decodePage(value: unknown, after: string | null): TaskPage {
+/** Validate a REST tracker page and its cursor against the requested page. */
+export function decodeRestTrackerPage(value: unknown, after: string | null): TaskPage {
   const decoded = Schema.decodeUnknownOption(taskPageSchema)(value);
 
   if (decoded._tag === 'None')
@@ -95,7 +96,8 @@ function decodePage(value: unknown, after: string | null): TaskPage {
   return page;
 }
 
-function decodeTask(value: unknown, id: string): Task {
+/** Validate a REST task detail or update against the requested ID. */
+export function decodeRestTask(value: unknown, id: string): Task {
   const decoded = Schema.decodeUnknownOption(taskSchema)(value);
 
   if (
@@ -159,7 +161,7 @@ export async function fetchRestTrackerPage({
     ...(signal ? { signal } : {}),
   });
 
-  return decodePage(value, after);
+  return decodeRestTrackerPage(value, after);
 }
 
 export async function fetchRestTaskById({
@@ -178,7 +180,7 @@ export async function fetchRestTaskById({
 
   const value = await readResponse(response);
 
-  return decodeTask(value, id);
+  return decodeRestTask(value, id);
 }
 
 async function readResponse(response: Response): Promise<unknown> {
@@ -210,10 +212,26 @@ export async function fetchRestPeople({
     ...(fetcher ? { fetcher } : {}),
     ...(signal ? { signal } : {}),
   });
+  return decodeRestPeople(value);
+}
+
+/** Validate a REST people collection. */
+export function decodeRestPeople(value: unknown): readonly Person[] {
   const decoded = Schema.decodeUnknownOption(personArraySchema)(value);
 
-  if (decoded._tag === 'None')
+  if (decoded._tag === 'None') {
     throw new Error('Invalid REST response for people.');
+  }
+
+  return decoded.value;
+}
+
+/** Validate a REST person update against the requested ID. */
+export function decodeRestPersonUpdate(value: unknown, id: string): Person {
+  const decoded = Schema.decodeUnknownOption(personSchema)(value);
+
+  if (decoded._tag === 'None' || decoded.value.id !== id)
+    throw new Error('Invalid REST response for person update.');
 
   return decoded.value;
 }
@@ -236,13 +254,7 @@ export async function fetchRestPersonUpdate({
     ...(fetcher ? { fetcher } : {}),
     ...(signal ? { signal } : {}),
   });
-  const decoded = Schema.decodeUnknownOption(personSchema)(value);
-
-  if (decoded._tag === 'None' || decoded.value.id !== id) {
-    throw new Error('Invalid REST response for person update.');
-  }
-
-  return decoded.value;
+  return decodeRestPersonUpdate(value, id);
 }
 
 export async function fetchRestTaskCreate({
@@ -316,7 +328,7 @@ export async function fetchRestTaskUpdate({
     ...(signal ? { signal } : {}),
   });
 
-  return decodeTask(value, id);
+  return decodeRestTask(value, id);
 }
 
 export async function fetchRestTaskDelete({

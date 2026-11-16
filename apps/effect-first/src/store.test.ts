@@ -26,8 +26,7 @@ import {
 } from './flows';
 import { trackerActions } from './reducer';
 import { EffectStore } from './effectStore';
-import { taskPagination } from './trackerApiReducers';
-import { trackerInvalidation } from './trackerInvalidation';
+import { createTestPageTransport } from './testPageTransport';
 
 import { createTrackerDatabase } from '@repo/project-tracker/database';
 import { createLocalActions } from '@repo/project-tracker';
@@ -60,12 +59,22 @@ beforeEach(() => {
 
 const runtimes: ManagedRuntime.ManagedRuntime<never, never>[] = [];
 
-function createAppStore(initial?: TrackerState) {
+function createAppStore(initial?: TrackerState, fetchPage?: FetchPage) {
   const runtime = ManagedRuntime.make(Layer.empty);
 
   runtimes.push(runtime);
 
-  return makeAppStore(runtime, initial);
+  return makeAppStore(
+    runtime,
+    initial,
+    fetchPage ? createTestPageTransport(fetchPage) : {},
+  );
+}
+
+function getTrackerServices(store: ReturnType<typeof makeAppStore<never, never>>) {
+  return store.dispatch(Effect.gen(function*() {
+    return yield* EffectStore;
+  }));
 }
 
 beforeEach(() => {
@@ -91,16 +100,17 @@ describe('Effect project tracker', () => {
   test('invalidates the hydrated task chain after an injected status save without refreshing', async () => {
     // Arrange: the initial task page is explicitly seeded fresh.
     const store = createAppStore();
+    const services = await getTrackerServices(store);
     const identity = store.getSnapshot().pagination.identity;
     const persist = vi.fn(async ({ taskId, value }: FieldWrite<TaskStatus>) => ({ taskId, value }));
 
-    expect(taskPagination.selectFreshness(store.getSnapshot(), identity)).toBe('fresh');
+    expect(services.taskPagination.selectFreshness(store.getSnapshot(), identity)).toBe('fresh');
 
     // Act: save a task through the injected persistence callback.
     await store.dispatch(saveStatus({ taskId: 'ATL-01', value: 'done', persist }));
 
     // Assert: the chain is stale without an automatic refresh.
-    expect(taskPagination.selectFreshness(store.getSnapshot(), identity)).toBe('stale');
+    expect(services.taskPagination.selectFreshness(store.getSnapshot(), identity)).toBe('stale');
     expect(store.getSnapshot().tasks['ATL-01']?.status).toBe('done');
     expect(persist).toHaveBeenCalledOnce();
     expect(fetch).not.toHaveBeenCalled();
@@ -108,21 +118,21 @@ describe('Effect project tracker', () => {
 
   test('discards a page whose newly discovered task was invalidated while loading', async () => {
     // Arrange: keep a generated page request pending.
-    const store = createAppStore();
-    const before = store.getSnapshot();
     let finish: (page: TaskPage) => void = () => { throw new Error('Page did not start.'); };
     let markStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
-    const read = store.dispatch(loadMoreTasks({
-      fetchPage: () => new Promise<TaskPage>((resolve) => {
-        finish = resolve;
-        markStarted();
-      }),
-    }));
+    const fetchPage: FetchPage = () => new Promise<TaskPage>((resolve) => {
+      finish = resolve;
+      markStarted();
+    });
+    const store = createAppStore(undefined, fetchPage);
+    const services = await getTrackerServices(store);
+    const before = store.getSnapshot();
+    const read = store.dispatch(loadMoreTasks());
     await started;
 
     // Act: invalidate an entity that is only known when the page arrives.
-    store.dispatch(trackerInvalidation.actions.invalidate({ tags: [{ type: 'Task', id: 'new-task' }] }));
+    store.dispatch(services.invalidation.actions.invalidate({ tags: [{ type: 'Task', id: 'new-task' }] }));
     finish({
       projects: [],
       people: [],
@@ -139,7 +149,7 @@ describe('Effect project tracker', () => {
     expect(after.result).toEqual(before.result);
     expect(after.pagination.cursor).toBe(before.pagination.cursor);
     expect(after.request.status).toBe('idle');
-    expect(taskPagination.selectFreshness(after, before.pagination.identity)).toBe('stale');
+    expect(services.taskPagination.selectFreshness(after, before.pagination.identity)).toBe('stale');
     expect(Object.values(after.api.requests).some((request) => request.status === 'superseded')).toBe(true);
   });
 
@@ -148,18 +158,19 @@ describe('Effect project tracker', () => {
     async (sourceMode) => {
       // Arrange: load the current source mode and its assigned people.
       const store = createAppStore();
+      const services = await getTrackerServices(store);
       await store.dispatch(selectSourceMode(sourceMode));
       const identity = store.getSnapshot().pagination.identity;
       const requestsBeforeRename = vi.mocked(fetch).mock.calls.length;
 
-      expect(taskPagination.selectFreshness(store.getSnapshot(), identity)).toBe('fresh');
+      expect(services.taskPagination.selectFreshness(store.getSnapshot(), identity)).toBe('fresh');
 
       // Act: rename a person without refreshing task pages.
       await store.dispatch(renamePerson({ personId: 'mara', name: 'Mara Sato' }));
 
       // Assert: the visible chain is stale across transport modes.
       expect(store.getSnapshot().people.mara?.name).toBe('Mara Sato');
-      expect(taskPagination.selectFreshness(store.getSnapshot(), identity)).toBe('stale');
+      expect(services.taskPagination.selectFreshness(store.getSnapshot(), identity)).toBe('stale');
       expect(vi.mocked(fetch).mock.calls.length).toBe(requestsBeforeRename + 1);
     },
   );
@@ -225,16 +236,12 @@ describe('Effect project tracker', () => {
 
   test('ignores a GraphQL page that completes after switching to REST', async () => {
     // Arrange: keep an older GraphQL response pending while REST becomes active.
-    const store = createAppStore();
     let resolveStalePage: ((page: TaskPage) => void) | undefined;
     const stalePage = new Promise<TaskPage>((resolve) => {
       resolveStalePage = resolve;
     });
-    const staleRead = store.dispatch(loadMoreTasks({
-      query: { search: 'stale' },
-
-      fetchPage: async () => stalePage,
-    }));
+    const store = createAppStore(undefined, async () => stalePage);
+    const staleRead = store.dispatch(loadMoreTasks({ query: { search: 'stale' } }));
 
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -486,14 +493,14 @@ describe('Effect project tracker', () => {
         '%cinput',
         expect.any(String),
         expect.objectContaining({
-          type: 'trackerApi/tasks/started',
+          type: 'trackerGraphql/tasks/started',
         })
       );
       expect(log).toHaveBeenCalledWith(
         '%cinput',
         expect.any(String),
         expect.objectContaining({
-          type: 'trackerApi/tasks/succeeded',
+          type: 'trackerGraphql/tasks/succeeded',
           payload: expect.objectContaining({
             result: expect.objectContaining({
               entities: expect.objectContaining({
@@ -510,28 +517,29 @@ describe('Effect project tracker', () => {
 
   test('merges pending query intent and ignores a superseded failure', async () => {
     // Arrange: the project request stays pending when another filter changes.
-    const store = createAppStore();
     let reject: (error: Error) => void = () => {
       throw new Error('Request did not start');
     };
-    const old = store.dispatch(loadMoreTasks({
-      query: { projectId: 'atlas' },
+    const fetchPage = vi.fn<FetchPage>(async ({ query }) => {
+      if (query.status === 'done')
+        return {
+          projects: [],
+          people: [],
+          tasks: [],
+          pageInfo: { endCursor: null, hasNextPage: false },
+          totalCount: 0,
+          statusCounts: [],
+        };
 
-      fetchPage: () => new Promise<TaskPage>((_resolve, fail) => {
+      return new Promise<TaskPage>((_resolve, fail) => {
         reject = fail;
-      }),
-    }));
-    const fetchPage = vi.fn<FetchPage>(async () => ({
-      projects: [],
-      people: [],
-      tasks: [],
-      pageInfo: { endCursor: null, hasNextPage: false },
-      totalCount: 0,
-      statusCounts: [],
-    }));
+      });
+    });
+    const store = createAppStore(undefined, fetchPage);
+    const old = store.dispatch(loadMoreTasks({ query: { projectId: 'atlas' } }));
 
     // Act: change status before the project request fails.
-    await store.dispatch(loadMoreTasks({ query: { status: 'done' }, fetchPage }));
+    await store.dispatch(loadMoreTasks({ query: { status: 'done' } }));
 
     const current = store.getSnapshot();
 
@@ -549,15 +557,9 @@ describe('Effect project tracker', () => {
 
   test('ignores a late response from a superseded backend query', async () => {
     // Arrange: the first request waits at the HTTP boundary.
-    const store = createAppStore();
     let resolve: (page: TaskPage) => void = () => {
       throw new Error('Request did not start');
     };
-    const old = store.dispatch(loadMoreTasks({
-      fetchPage: () => new Promise<TaskPage>((complete) => {
-        resolve = complete;
-      }),
-    }));
     const page: TaskPage = {
       projects: [],
       people: [],
@@ -566,13 +568,16 @@ describe('Effect project tracker', () => {
       totalCount: 0,
       statusCounts: []
     };
+    const fetchPage: FetchPage = ({ query }) => query.search
+      ? Promise.resolve(page)
+      : new Promise<TaskPage>((complete) => {
+        resolve = complete;
+      });
+    const store = createAppStore(undefined, fetchPage);
+    const old = store.dispatch(loadMoreTasks());
 
     // Act: replace the query, then let its earlier request finish.
-    await store.dispatch(loadMoreTasks({
-      query: { search: 'new query' },
-
-      fetchPage: async () => page
-    }));
+    await store.dispatch(loadMoreTasks({ query: { search: 'new query' } }));
 
     const current = store.getSnapshot();
 
@@ -587,24 +592,29 @@ describe('Effect project tracker', () => {
 
   test('retries the same backend cursor after a failed append', async () => {
     // Arrange: obtain a real first-page cursor.
-    const store = createAppStore();
-
-    await store.dispatch(loadMoreTasks());
-
-    const cursor = store.getSnapshot().result.pageInfo.endCursor;
+    let useTransport = false;
     let fail = true;
     const fetchPage = vi.fn<FetchPage>(async (input) => {
+      if (!useTransport)
+        return fetchTaskPage(input);
       if (fail)
         throw new Error('Temporary HTTP failure');
 
       return fetchTaskPage(input);
     });
+    const store = createAppStore(undefined, fetchPage);
+
+    await store.dispatch(loadMoreTasks());
+
+    const cursor = store.getSnapshot().result.pageInfo.endCursor;
+    fetchPage.mockClear();
 
     // Act: fail once, then retry with the same workflow.
-    await store.dispatch(loadMoreTasks({ fetchPage }));
+    useTransport = true;
+    await store.dispatch(loadMoreTasks());
     expect(store.getSnapshot().result.ids).toHaveLength(20);
     fail = false;
-    await store.dispatch(loadMoreTasks({ fetchPage }));
+    await store.dispatch(loadMoreTasks());
 
     // Assert: cursor advances only after success, with no skipped records.
     expect(fetchPage).toHaveBeenNthCalledWith(
@@ -691,8 +701,9 @@ describe('Effect project tracker', () => {
     async () => {
       // Arrange: a pending request owns the optimistic priority.
       const store = createAppStore();
+      const services = await getTrackerServices(store);
 
-      await store.dispatch(trackerActions.priorityStarted({
+      await store.dispatch(services.operations.priority.actions.started({
         taskId: 'ATL-01',
         value: 'low',
         requestId: 'current'
@@ -701,13 +712,13 @@ describe('Effect project tracker', () => {
       const pending = store.getSnapshot();
 
       // Act: old confirmation and failure actions arrive.
-      await store.dispatch(trackerActions.priorityConfirmed({
+      await store.dispatch(services.operations.priority.actions.confirmed({
         taskId: 'ATL-01',
         value: 'low',
         result: 'medium',
         requestId: 'old'
       }));
-      await store.dispatch(trackerActions.priorityFailed({
+      await store.dispatch(services.operations.priority.actions.failed({
         taskId: 'ATL-01',
         value: 'low',
         requestId: 'old',

@@ -10,35 +10,56 @@ import {
 } from 'vitest';
 
 import {
-  createRequestApi as createReduxApi,
+  createGraphqlApi as createReduxApi,
   type RequestActions,
   type RequestApiState,
 } from '@repo/redux-toolkit';
-import { createRequestApi as createEffectApi } from '@repo/effect-store-toolkit';
+import { createGraphqlApi as createEffectApi } from '@repo/effect-store-toolkit';
 
 type State = {
   readonly api: RequestApiState;
   readonly value: number;
 };
 
+function decodeNumber(data: unknown): number {
+  if (typeof data !== 'number')
+    throw new Error('Invalid number.');
+
+  return data;
+}
+
 for (const [name, create] of [
   ['Redux', createReduxApi],
   ['Effect', createEffectApi],
 ] satisfies readonly (readonly [string, typeof createReduxApi])[]) {
   describe(`${name} generated API reducer`, () => {
-    function setup() {
+    function setup(
+      execute: (variables: { readonly id: string }, signal: AbortSignal) => Promise<number> = async () => 8,
+    ) {
+      const transport = async (variables: { readonly id: string }, signal: AbortSignal) => {
+        const value = await execute(variables, signal);
+        return { status: 'received', read: async () => value } satisfies {
+          readonly status: 'received';
+          readonly read: () => Promise<unknown>;
+        };
+      };
       const api = create({
         name: 'numbers',
+        endpoint: '/graphql',
         state: (state) => state.api,
         getState: (state: State) => state.api,
         operations: (builder) => ({
           read: builder.query('read', {
-            decode: () => 8,
+            document: 'query Read { read }',
+            transport,
+            decode: decodeNumber,
             normalize: (value: number, variables: { readonly id: string }) => ({ id: variables.id, value }),
             scope: () => 'selection',
           }),
           save: builder.mutation('save', {
-            decode: () => 9,
+            document: 'mutation Save { save }',
+            transport,
+            decode: decodeNumber,
             normalize: (value: number, variables: { readonly id: string }) => ({ id: variables.id, value }),
           }),
         }),
@@ -55,12 +76,12 @@ for (const [name, create] of [
 
     test.each(['read', 'save'] satisfies readonly ('read' | 'save')[])('manages %s metadata without domain handlers', async (operation) => {
       // Arrange: install only the generated API reducer.
-      const { api, store, snapshot } = setup();
       const execute = vi.fn(async () => 8);
+      const { api, store, snapshot } = setup(execute);
 
       // Act: run without registering any individual action cases.
       const result = await Effect.runPromise(api.operations[operation].run({
-        store, variables: { id: 'one' }, execute,
+        store, variables: { id: 'one' },
       }));
 
       // Assert: metadata is managed while domain state is untouched.
@@ -85,14 +106,14 @@ for (const [name, create] of [
 
     test('records transport failure without domain handlers', async () => {
       // Arrange: only metadata handling is installed.
-      const { api, store, snapshot } = setup();
       const execute = vi.fn(async (): Promise<number> => {
         throw new Error('Transport failed.');
       });
+      const { api, store, snapshot } = setup(execute);
       const variables = { id: 'one' };
 
       // Act: run a failing read.
-      const result = await Effect.runPromise(api.operations.read.run({ store, variables, execute }));
+      const result = await Effect.runPromise(api.operations.read.run({ store, variables }));
 
       // Assert: the generated reducer owns visible failure metadata.
       expect(result).toEqual({ status: 'failed', error: 'Transport failed.' });
@@ -104,7 +125,6 @@ for (const [name, create] of [
 
     test('records cancellation without domain handlers', async () => {
       // Arrange: transport stays pending until its only caller cancels.
-      const { api, store, snapshot } = setup();
       const variables = { id: 'one' };
       let aborted = false;
       const execute = vi.fn((received: { readonly id: string }, signal: AbortSignal): Promise<number> =>
@@ -115,7 +135,8 @@ for (const [name, create] of [
             reject(new Error('Transport aborted.'));
           }, { once: true });
         }));
-      const worker = Effect.runFork(api.operations.read.run({ store, variables, execute }));
+      const { api, store, snapshot } = setup(execute);
+      const worker = Effect.runFork(api.operations.read.run({ store, variables }));
 
       // Act: cancel the only waiter.
       await Effect.runPromise(Fiber.interrupt(worker));
@@ -199,7 +220,7 @@ for (const [name, create] of [
 
       // Act: execute the normalized read.
       await Effect.runPromise(api.operations.read.run({
-        store, variables: { id: 'one' }, execute: async () => 8,
+        store, variables: { id: 'one' },
       }));
 
       // Assert: domain state and metadata settle together.

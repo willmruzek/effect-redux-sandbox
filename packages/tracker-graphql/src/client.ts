@@ -220,6 +220,16 @@ export async function fetchTaskCreate({
 }
 
 /** Transport and validation only; each app owns optimistic/lifecycle orchestration. */
+/** Validate a GraphQL task update against the requested ID. */
+export function decodeTaskUpdate(data: unknown, id: string): Task {
+  const decoded = Schema.decodeUnknownOption(Schema.Struct({ updateTask: taskSchema }))(data);
+
+  if (decoded._tag === 'None' || decoded.value.updateTask.id !== id)
+    throw new Error('Invalid GraphQL response for UpdateTask.');
+
+  return decoded.value.updateTask;
+}
+
 export async function fetchTaskUpdate({
   endpoint,
   id,
@@ -250,13 +260,7 @@ export async function fetchTaskUpdate({
     ...(fetcher ? { fetcher } : {}),
     ...(signal ? { signal } : {}),
   });
-  const decoded = Schema.decodeUnknownOption(Schema.Struct({ updateTask: taskSchema }))(data);
-
-  if (decoded._tag === 'None' || decoded.value.updateTask.id !== id) {
-    throw new Error('Invalid GraphQL response for UpdateTask.');
-  }
-
-  return decoded.value.updateTask;
+  return decodeTaskUpdate(data, id);
 }
 
 /** Fetch-only client: callers run this network boundary inside an Effect. */

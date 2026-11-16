@@ -4,15 +4,18 @@ import {
 } from '@repo/effect-store-toolkit';
 import type { NormalizedTaskPage } from '@repo/project-tracker';
 
-import type { TrackerApiState } from './trackerApiDefinition';
+import type { TrackerApiState } from './trackerApiState';
+import type { TrackerTag } from './trackerApiTags';
 
-export type TrackerTag = 'TaskList' | 'Task' | 'Person';
+export type { TrackerTag } from './trackerApiTags';
 
-export const trackerInvalidation = createInvalidationRegistry<TrackerApiState, TrackerTag>()({
-  name: 'tracker',
-  getState: (state) => state.invalidation,
-  setState: (state, invalidation) => ({ ...state, invalidation }),
-});
+export function createTrackerInvalidation() {
+  return createInvalidationRegistry<TrackerApiState, TrackerTag>()({
+    name: 'tracker',
+    getState: (state) => state.invalidation,
+    setState: (state, invalidation) => ({ ...state, invalidation }),
+  });
+}
 
 export function taskTags(taskId: string): readonly InvalidationTag<TrackerTag>[] {
   return [{ type: 'TaskList' }, { type: 'Task', id: taskId }];

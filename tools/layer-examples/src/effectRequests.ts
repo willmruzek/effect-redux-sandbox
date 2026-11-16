@@ -12,7 +12,7 @@ import {
 import {
   createEntityTable,
   createOptimisticFieldReducers,
-  createRequestApi,
+  createGraphqlApi,
   createRequestLifecycle,
   createSlice,
   type RequestActions,
@@ -27,11 +27,18 @@ import {
   type QuantityInput,
 } from './inventory.js';
 
-export function createEffectRequests({ registerWrites = true } = {}) {
+export function createEffectRequests({
+  registerWrites = true,
+  fetcher,
+}: {
+  readonly registerWrites?: boolean;
+  readonly fetcher?: (url: string, init: RequestInit) => Promise<Response>;
+} = {}) {
   const items = createEntityTable({ name: 'inventory', key: (item: Item) => item.sku });
-  const api = createRequestApi({
+  const api = createGraphqlApi({
     name: 'inventory',
     endpoint: '/inventory',
+    ...(fetcher ? { fetcher } : {}),
     state: (state) => state.api,
     getState: (state: InventoryState) => state.api,
 

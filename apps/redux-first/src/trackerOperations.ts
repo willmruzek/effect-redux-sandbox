@@ -3,23 +3,18 @@ import type {
   TaskDeletionInput,
   TaskDetailWriteInput,
   TaskFieldInput,
-  Person,
-  PersonNameInput,
   TaskCreationInput,
   Task,
   TaskPriority,
   TaskStatus
 } from '@repo/project-tracker';
 import type { TrackerApiState } from './trackerApiDefinition';
-import { taskTags, trackerInvalidation } from './trackerInvalidation';
+import {
+  taskTags,
+  type createTrackerInvalidation,
+} from './trackerInvalidation';
 
-export const trackerOperations = {
-  peopleRequest: createRequestLifecycle<TrackerApiState, readonly Person[]>()('tracker/peopleRequest', {
-    pending: (state) =>
-      state.sourceMode === 'mixed' && state.peopleRequest.status === 'loading'
-        ? state.peopleRequest : undefined
-  }),
-
+export const createTrackerOperations = (trackerInvalidation: ReturnType<typeof createTrackerInvalidation>) => ({
   taskDetailWrite: createRequestLifecycle<TrackerApiState, Task>()('tracker/taskDetailWrite', {
     invalidation: {
       registry: trackerInvalidation,
@@ -84,53 +79,6 @@ export const trackerOperations = {
     }
   }),
 
-  personName: createRequestLifecycle<TrackerApiState, Person>()('tracker/personName', {
-    invalidation: {
-      registry: trackerInvalidation,
-      tags: (input: PersonNameInput, result: Person) => [
-        { type: 'Person', id: input.personId }, { type: 'Person', id: result.id },
-      ],
-    },
-    pending: (state, payload: PersonNameInput) => {
-      const pending = state.personWrites[payload.personId];
+});
 
-      return pending?.status === 'saving' && state.people[payload.personId] ? pending : undefined;
-    }
-  }),
-
-  assignee: createRequestLifecycle<TrackerApiState, string | null>()('tracker/assignee', {
-    invalidation: {
-      registry: trackerInvalidation,
-      tags: (input: TaskFieldInput<string | null>) => taskTags(input.taskId),
-    },
-    pending: (state, payload: TaskFieldInput<string | null>) => {
-      const pending = state.assigneeWrites[payload.taskId];
-
-      return pending?.status === 'saving' && state.tasks[payload.taskId] ? pending : undefined;
-    }
-  }),
-};
-
-export const operationActions = {
-  taskDetailWriteStarted: trackerOperations.taskDetailWrite.actions.started,
-  taskDetailWriteConfirmed: trackerOperations.taskDetailWrite.actions.confirmed,
-  taskDetailWriteFailed: trackerOperations.taskDetailWrite.actions.failed,
-  deletionStarted: trackerOperations.deletion.actions.started,
-  deletionConfirmed: trackerOperations.deletion.actions.confirmed,
-  deletionFailed: trackerOperations.deletion.actions.failed,
-  creationStarted: trackerOperations.creation.actions.started,
-  creationConfirmed: trackerOperations.creation.actions.confirmed,
-  creationFailed: trackerOperations.creation.actions.failed,
-  statusStarted: trackerOperations.status.actions.started,
-  statusConfirmed: trackerOperations.status.actions.confirmed,
-  statusFailed: trackerOperations.status.actions.failed,
-  priorityStarted: trackerOperations.priority.actions.started,
-  priorityConfirmed: trackerOperations.priority.actions.confirmed,
-  priorityFailed: trackerOperations.priority.actions.failed,
-  personNameStarted: trackerOperations.personName.actions.started,
-  personNameConfirmed: trackerOperations.personName.actions.confirmed,
-  personNameFailed: trackerOperations.personName.actions.failed,
-  assigneeStarted: trackerOperations.assignee.actions.started,
-  assigneeConfirmed: trackerOperations.assignee.actions.confirmed,
-  assigneeFailed: trackerOperations.assignee.actions.failed,
-};
+export type TrackerOperations = ReturnType<typeof createTrackerOperations>;

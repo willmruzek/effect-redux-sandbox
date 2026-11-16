@@ -1,12 +1,12 @@
 import {
   createInvalidationRegistry as createReduxInvalidation,
-  createRequestApi as createReduxApi,
+  createGraphqlApi as createReduxApi,
   type InvalidationState,
   type RequestApiState,
 } from '@repo/redux-toolkit';
 import {
   createInvalidationRegistry as createEffectInvalidation,
-  createRequestApi as createEffectApi,
+  createGraphqlApi as createEffectApi,
 } from '@repo/effect-store-toolkit';
 import { Effect, Fiber } from 'effect';
 import { describe, expect, test, vi } from 'vitest';
@@ -23,7 +23,7 @@ describe.each([
   ['Redux', createReduxInvalidation, createReduxApi],
   ['Effect', createEffectInvalidation, createEffectApi],
 ])('%s public invalidation', (_name, createInvalidation, createApi) => {
-  function setupMutation() {
+  function setupMutation(execute: (variables: Variables) => Promise<string>) {
     const registry = createInvalidation<State, 'Item'>()({
       name: 'inventory',
       getState: (state) => state.invalidation,
@@ -31,10 +31,16 @@ describe.each([
     });
     const api = createApi({
       name: 'writes',
+      endpoint: '/graphql',
       state: (state: State) => state.first,
       getState: (state) => state.first,
       operations: (builder) => ({
         save: builder.mutation('save', {
+          document: 'mutation Save { save }',
+          transport: async (variables: Variables) => {
+            const result = await execute(variables);
+            return { status: 'received', read: async () => result };
+          },
           decode: (data: unknown, variables: Variables) => `${variables.id}:${String(data)}`,
           normalize: (value: string) => value,
           scope: () => 'active',
@@ -65,46 +71,54 @@ describe.each([
 
   test('does not invalidate on failed or interrupted writes', async () => {
     // Arrange: an established result depends on the item being written.
-    const { api, registry, store, snapshot } = setupMutation();
     const variables = { id: 'a' };
+    let notifyStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    let calls = 0;
+    const { api, registry, store, snapshot } = setupMutation(async () => {
+      calls += 1;
+      if (calls === 1)
+        throw new Error('Rejected');
+      return new Promise<string>(() => { notifyStarted(); });
+    });
 
     // Act: reject one write and interrupt a second while transport is pending.
     const failed = await Effect.runPromise(api.operations.save.run({
-      store, variables, execute: async () => { throw new Error('Rejected'); },
+      store, variables,
     }));
-    let notifyStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
-    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
     const cancelled = Effect.runFork(api.operations.save.run({
       store,
       variables,
-      execute: () => new Promise<string>(() => { notifyStarted(); }),
     }));
     await started;
     await Effect.runPromise(Fiber.interrupt(cancelled));
 
     // Assert: neither unsuccessful write marks the result stale.
-    expect(failed).toEqual({ status: 'failed', error: 'Rejected' });
+    expect(failed).toEqual({ status: 'failed', error: 'Rejected', serverMayHaveCommitted: true });
     expect(snapshot().invalidation.revision).toBe(0);
     expect(registry.select(snapshot(), 'item-a')).toBe('fresh');
   });
 
   test('does not invalidate for a superseded successful write', async () => {
     // Arrange: an older write waits while a different write takes its scope.
-    const { api, registry, store, snapshot } = setupMutation();
     let finish: (value: string) => void = () => { throw new Error('Write did not start.'); };
     let notifyStarted: () => void = () => { throw new Error('Start signal was not initialized.'); };
     const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const { api, registry, store, snapshot } = setupMutation(async (variables) => {
+      if (variables.id === 'b')
+        return 'saved';
+      return new Promise<string>((resolve) => {
+        finish = resolve;
+        notifyStarted();
+      });
+    });
     const old = Effect.runPromise(api.operations.save.run({
       store,
       variables: { id: 'a' },
-      execute: () => new Promise<string>((resolve) => {
-        finish = resolve;
-        notifyStarted();
-      }),
     }));
     await started;
     const newer = await Effect.runPromise(api.operations.save.run({
-      store, variables: { id: 'b' }, execute: async () => 'saved',
+      store, variables: { id: 'b' },
     }));
 
     // Act: the superseded server write also succeeds.
@@ -125,12 +139,19 @@ describe.each([
       getState: (state) => state.invalidation,
       setState: (state, invalidation) => ({ ...state, invalidation }),
     });
+    const execute = vi.fn(async () => 'value');
     const first = createApi({
       name: 'first',
+      endpoint: '/graphql',
       state: (state: State) => state.first,
       getState: (state) => state.first,
       operations: (builder) => ({
         item: builder.query('item', {
+          document: 'query Item { item }',
+          transport: async () => {
+            const result = await execute();
+            return { status: 'received', read: async () => result };
+          },
           decode: (data: unknown, variables: Variables) => `${variables.id}:${String(data)}`,
           normalize: (value: string) => value,
           provides: {
@@ -143,10 +164,16 @@ describe.each([
     });
     const second = createApi({
       name: 'second',
+      endpoint: '/graphql',
       state: (state: State) => state.second,
       getState: (state) => state.second,
       operations: (builder) => ({
         item: builder.query('item', {
+          document: 'query Item { item }',
+          transport: async () => {
+            const result = await execute();
+            return { status: 'received', read: async () => result };
+          },
           decode: (data: unknown, variables: Variables) => `${variables.id}:${String(data)}`,
           normalize: (value: string) => value,
           provides: {
@@ -174,12 +201,11 @@ describe.each([
     }
     const left = makeStore();
     const right = makeStore();
-    const execute = vi.fn(async () => 'value');
     const variables = { id: 'a' };
 
     for (const store of [left, right]) {
-      await Effect.runPromise(first.operations.item.run({ store, variables, execute }));
-      await Effect.runPromise(second.operations.item.run({ store, variables, execute }));
+      await Effect.runPromise(first.operations.item.run({ store, variables }));
+      await Effect.runPromise(second.operations.item.run({ store, variables }));
     }
 
     // Act: invalidate the shared tag in only the left store.

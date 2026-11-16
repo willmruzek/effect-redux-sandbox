@@ -23,11 +23,9 @@ import {
 } from '@repo/tracker-graphql/client';
 import {
   fetchRestPeople,
-  fetchRestPersonUpdate,
   fetchRestTaskCreate,
   fetchRestTaskDelete,
   fetchRestTaskUpdate,
-  fetchRestTrackerPage
 } from '@repo/tracker-graphql/rest-client';
 
 import {
@@ -36,9 +34,6 @@ import {
 
 import { EffectStore } from './effectStore';
 import { trackerActions } from './reducer';
-import { trackerApi } from './api';
-import { trackerOperations } from './trackerOperations';
-import { taskPagination } from './trackerApiReducers';
 
 function updateTask(
   sourceMode: TrackerSourceMode,
@@ -71,29 +66,24 @@ export const loadMoreTasks = Effect.fn('loadMoreTasks')(function*(options: LoadO
 
   const sourceMode = options.sourceMode ?? state.sourceMode;
 
-  const fetchPage = options.fetchPage;
+  const api = sourceMode === 'rest' ? store.apis.rest : store.apis.graphql;
 
-  yield* taskPagination.next({
+  yield* store.taskPagination.next({
     store,
     identity: variablesKey({ query, sourceMode }),
     restart: Boolean(options.query),
-    query: (after, request) => trackerApi.operations.tasks.runWithResult({
-      variables: { mode: request.mode === 'refresh' ? 'refresh' : 'page', query, after, fail: options.fail ?? false, sourceMode },
-      store,
-      fence: { identity: taskPagination.key(request.identity), requestId: request.requestId },
-      ...(fetchPage ? { execute: async (variables) => ({
-        page: await fetchPage(request.mode === 'refresh'
-          ? { after: variables.after, query: variables.query, fail: variables.fail }
-          : variables),
-        loadedPages: 1,
-      }) }
-        : sourceMode === 'rest' ? {
-          execute: async (variables, signal) => ({
-            page: await fetchRestTrackerPage({ endpoint: '/api', after: variables.after, query: variables.query, fail: variables.fail, signal }),
-            loadedPages: 1,
-          }),
-        } : {}),
-    }),
+    query: (after, request) => api.endpoints.tasks.initiate({
+        mode: request.mode === 'refresh' ? 'refresh' : 'page',
+        query,
+        after,
+        fail: options.fail ?? false,
+        sourceMode,
+      }, {
+        fence: {
+          identity: store.taskPagination.key(request.identity),
+          requestId: request.requestId,
+        },
+      }),
   });
 });
 
@@ -102,28 +92,24 @@ export const refreshTasks = Effect.fn('refreshTasks')(function*(options: Refresh
   const store = yield* EffectStore;
   const state = yield* store.getState;
   const query = requestedQuery(state);
-  const fetchPage = options.fetchPage;
   const sourceMode = options.sourceMode ?? state.sourceMode;
+  const api = sourceMode === 'rest' ? store.apis.rest : store.apis.graphql;
 
-  yield* taskPagination.refresh({
+  yield* store.taskPagination.refresh({
     store,
     identity: variablesKey({ query, sourceMode }),
-    query: (after, request) => trackerApi.operations.tasks.runWithResult({
-      variables: { mode: 'refresh', query, after, fail: options.fail ?? false, sourceMode },
-      store,
-      fence: { identity: taskPagination.key(request.identity), requestId: request.requestId },
-      ...(fetchPage ? {
-        execute: async (variables) => ({
-          page: await fetchPage({ after: variables.after, query: variables.query, fail: variables.fail }),
-          loadedPages: 1,
-        }),
-      } : sourceMode === 'rest' ? {
-        execute: async (variables, signal) => ({
-          page: await fetchRestTrackerPage({ endpoint: '/api', after: variables.after, query: variables.query, fail: variables.fail, signal }),
-          loadedPages: 1,
-        }),
-      } : {}),
-    }),
+    query: (after, request) => api.endpoints.tasks.initiate({
+        mode: 'refresh',
+        query,
+        after,
+        fail: options.fail ?? false,
+        sourceMode,
+      }, {
+        fence: {
+          identity: store.taskPagination.key(request.identity),
+          requestId: request.requestId,
+        },
+      }),
   });
 });
 
@@ -132,7 +118,7 @@ export const loadPeople = Effect.fn('loadPeople')(function*() {
 
   if ((yield* store.getState).sourceMode !== 'mixed')
     return;
-  yield* trackerOperations.peopleRequest.run({
+  yield* store.operations.peopleRequest.run({
     store: store,
 
     input: {},
@@ -164,7 +150,7 @@ export const deleteTask = Effect.fn('deleteTask')(function*(options: DeleteOptio
 
   const { task } = validation;
 
-  const outcome = yield* trackerOperations.deletion.run({
+  const outcome = yield* store.operations.deletion.run({
     store: store,
 
     input: {
@@ -219,7 +205,7 @@ export const createTask = Effect.fn('createTask')(function*(options: CreateOptio
     task = { ...options.input, id: `temp:${operationId}` };
   }
 
-  const outcome = yield* trackerOperations.creation.run({
+  const outcome = yield* store.operations.creation.run({
     store: store,
 
     input: {
@@ -291,7 +277,7 @@ export const saveTaskDetails = Effect.fn('saveTaskDetails')(function*(options: D
 
   const sourceMode = options.sourceMode ?? state.sourceMode;
 
-  const outcome = yield* trackerOperations.taskDetailWrite.run({
+  const outcome = yield* store.operations.taskDetailWrite.run({
     store: store,
 
     input: {
@@ -325,7 +311,7 @@ export const saveStatus = Effect.fn('saveStatus')(function*(options: WriteOption
   if (validation.status === 'invalid')
     return yield* Effect.fail(new Error(validation.error));
 
-  const outcome = yield* trackerOperations.status.run({
+  const outcome = yield* store.operations.status.run({
     store: store,
 
     input: {
@@ -370,7 +356,7 @@ export const savePriority = Effect.fn('savePriority')(function*(options: WriteOp
   if (validation.status === 'invalid')
     return yield* Effect.fail(new Error(validation.error));
 
-  const outcome = yield* trackerOperations.priority.run({
+  const outcome = yield* store.operations.priority.run({
     store: store,
 
     input: {
@@ -420,24 +406,13 @@ export const saveAssignee = Effect.fn('saveAssignee')(function*(options: FieldWr
 
   const { task } = validation;
 
-  const outcome = yield* trackerOperations.assignee.run({
-    store: store,
-
-    input: {
-      taskId: task.id,
-      value: options.value
-    },
-
-    execute: async (signal) => {
-      const saved = await updateTask(state.sourceMode, {
-        id: task.id,
-        patch: { assigneeId: options.value },
-        fail: options.fail ?? false,
-        signal,
-      });
-
-      return saved.assigneeId;
-    },
+  const api = state.sourceMode === 'rest' ? store.apis.rest : store.apis.graphql;
+  const outcome = yield* api.endpoints.assignee.initiate({
+      id: task.id,
+      patch: { assigneeId: options.value },
+      fail: options.fail ?? false,
+      delayMs: 700,
+      sourceMode: state.sourceMode,
   });
 
   if (outcome.status === 'succeeded') {
@@ -460,23 +435,8 @@ export const renamePerson = Effect.fn('renamePerson')(function*(options: PersonN
 
   const name = options.name.trim();
 
-  yield* trackerOperations.personName.run({
-    store: store,
-
-    input: {
-      ...options,
-      name
-    },
-
-    execute: async (signal) => {
-      const saved = await fetchRestPersonUpdate({
-        endpoint: '/api',
-        id: options.personId,
-        name,
-        signal,
-      });
-
-      return saved;
-    },
+  yield* store.apis.rest.endpoints.renamePerson.initiate({
+    personId: options.personId,
+    name,
   });
 });

@@ -9,11 +9,13 @@ import {
 } from 'effect';
 
 import type { RootState } from './reducer';
+import type { TrackerApiStoreId } from './trackerApiStore';
+import type { TrackerServices } from './trackerServices';
 
 export type DispatchableEffect<A = unknown, E = unknown, R = never> = Effect.Effect<
   A,
   E,
-  ReduxStore | R
+  ReduxStore | TrackerApiStoreId | R
 >;
 
 export type EffectDispatch<R = never> = <A, E>(
@@ -26,7 +28,9 @@ export type ReduxDispatch<R = never> = Dispatch<UnknownAction> &
 
 export type StoreEffectDispatch = {
   <Action extends UnknownAction>(action: Action): Effect.Effect<Action>;
-  <A, E, R>(program: Effect.Effect<A, E, R>): Effect.Effect<A, E, Exclude<R, ReduxStore>>;
+  <A, E, R>(
+    program: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, Exclude<R, ReduxStore | TrackerApiStoreId>>;
 };
 
 export class ReduxStore extends Context.Service<
@@ -34,5 +38,5 @@ export class ReduxStore extends Context.Service<
   {
     readonly getState: Effect.Effect<RootState>;
     readonly dispatch: StoreEffectDispatch;
-  }
+  } & TrackerServices
 >()('@repo/redux-first/reduxStore/ReduxStore') { }
