@@ -50,7 +50,7 @@ traces and runnable public-API examples.
 | Failure rollback | ✅ | ✅ | ✅ Field helper restores the original value and records an error |
 | Stale-settlement protection | ✅ | ✅ | ✅ Explicit request ownership and latest-wins guards |
 | Decode and normalize responses | 🟡 Query function or schema integration | 🟡 Endpoint transforms or base query | ✅ App-defined contracts and shared entity utilities |
-| Transport choice | ✅ Query function | ✅ Base query or endpoint logic | ✅ GraphQL helper or app-supplied execution |
+| Transport choice | ✅ Query function | ✅ Base query or endpoint logic | ✅ Separate typed REST and GraphQL factories |
 | Pagination | ✅ Query and infinite-query patterns | ✅ Endpoint patterns | ✅ Headless library-owned cursor workflow; app-owned transport and merges |
 | Domain rules and merge policy | 🟡 App-defined | 🟡 App-defined | ✅ Explicitly app-owned |
 
@@ -80,13 +80,17 @@ this roadmap does not require an endpoint response cache.
   retention and eviction ownership.
 - [ ] **Background refetch:** add library-owned scheduling and configurable
   triggers, with defined active-query ownership and cancellation. See
-  [plan 0012](plans/0012-query-refetch.md).
+  [plan 0013](plans/0013-query-refetch.md).
 - [x] **Mutation invalidation:** let mutations declare affected tags and mark
   dependent queries stale; refresh remains explicit.
   See [plan 0011](plans/0011-query-mutation-invalidation.md).
-- [x] **Manual request hooks:** expose generated query and mutation triggers,
-  status and errors without requiring React components to inspect store
-  metadata. Subscriptions do not automatically start requests; see
+- [x] **REST and GraphQL API factories:** define transport-specific endpoints
+  and factory-owned optimistic mutations. See
+  [plan 0012](plans/0012-rest-graphql-api-factories.md).
+- [x] **Headless request API:** expose generated query and mutation
+  `initiate(variables)` and `select(variables)` methods without requiring React
+  components to inspect store metadata. Subscriptions do not automatically
+  start requests; see
   [plan 0009](plans/0009-manual-request-hooks.md) for scope and limitations.
 - [x] **Local-only entity tables:** declare local ownership and support validated
   synchronous writes without transport or request lifecycles.

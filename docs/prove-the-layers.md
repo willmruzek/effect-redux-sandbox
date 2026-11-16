@@ -67,7 +67,7 @@ artifact validation are not claimed.
 | Failure rollback | ✅ | ✅ | ✅ Field helper restores the original value and records an error |
 | Stale-settlement protection | ✅ | ✅ | ✅ Explicit request ownership and latest-wins guards |
 | Decode and normalize responses | 🟡 Query function or schema integration | 🟡 Endpoint transforms or base query | ✅ App-defined contracts and shared entity utilities |
-| Transport choice | ✅ Query function | ✅ Base query or endpoint logic | ✅ GraphQL helper or app-supplied execution |
+| Transport choice | ✅ Query function | ✅ Base query or endpoint logic | ✅ Separate typed REST and GraphQL factories |
 | Pagination | ✅ Query and infinite-query patterns | ✅ Endpoint patterns | ✅ Headless library-owned cursor workflow; app-owned transport and merges |
 | Domain rules and merge policy | 🟡 App-defined | 🟡 App-defined | ✅ Explicitly app-owned |
 
@@ -98,16 +98,16 @@ transition. A page claiming more results must supply a new non-null cursor.
 Cursor equality uses `Object.is`, so use scalar cursors or stable references.
 
 The `query` callback receives the chosen cursor and request metadata and can
-call a generated operation's `runWithResult`; its successful outcome contains
-the normalized result. It shares the same in-flight execution as `run` for the
-same operation, stable store-service object and canonical variables. `run`
-retains its original outcome shape. The optional `execute` callback instead
-accepts a cursor and abort signal and returns a page directly.
+call a generated endpoint's `initiate(variables)`; its successful outcome
+contains the normalized result. Initiations share the same in-flight execution
+for the same operation, stable store-service object and canonical variables.
+The optional `execute` callback instead accepts a cursor and abort signal and
+returns a page directly.
 
 For an invalidation-enabled chain, configure the generated query with the same
 registry and pass `fence: { identity: pagination.key(request.identity),
-requestId: request.requestId }` to `runWithResult`. This carries the chain's
-start revision into the query guard. The query's `fromResult` and pagination's
+requestId: request.requestId }` to `initiate`. This carries the chain's start
+revision into the query guard. The query's `fromResult` and pagination's
 `fromPage` must describe the same page dependencies. Fenced query registrations
 are transient; the chain owns retained freshness rather than each cursor.
 The pagination reducer separately fences its later page and cursor commit.
@@ -116,7 +116,7 @@ or replacement is required before appending.
 Appends accumulate page tags, while a successful first-page refresh replaces
 them. No invalidation starts a refresh automatically.
 
-Generated query success handlers run before `runWithResult` returns. When
+Generated query success handlers run before `initiate` returns. When
 composing with pagination, do not independently merge the page in that handler:
 install the pagination reducer and merge there so stale or invalid pages cannot
 commit early. Validate cursor invariants during normalization as well if query
@@ -148,8 +148,9 @@ cache or a new Promise API. `run` remains a lazy Effect: identical queries using
 the same operation definition and stable receiving store service object await
 one execution and its original success, failure or superseded outcome.
 External callers may receive different Promise objects around that execution.
-The first caller supplies the transport options and Effect context; later
-callers do not execute their own fetcher or callback.
+The inventory consumers configure their fetcher when creating the GraphQL API;
+the first caller supplies the execution context and later callers join the
+same transport.
 With synchronous store services, execution still publishes loading state and
 starts transport immediately. A duplicate launched by a started-action observer
 joins the already registered execution.
@@ -208,10 +209,11 @@ The shared UI knows callbacks and state, not store services or request APIs.
 | [store workflows](../apps/redux-first/src/store.ts) obtain `ReduxStore` | [flows](../apps/effect-first/src/flows.ts) obtain `EffectStore` |
 | [middleware](../apps/redux-first/src/effectMiddleware.ts) supplies the service and executes external programs through the app runtime | [core store](../packages/effect-store/src/index.ts) supplies the service and executes external programs through the app runtime |
 
-Each workflow prepares the query identity and chooses the transport, then calls
-its toolkit's cursor pagination definition. Pagination checks eligibility and
-selects the cursor. GraphQL uses the operation document; REST supplies an
-execution callback. Mixed mode keeps people ownership separate.
+Each workflow prepares the query identity and chooses the REST or GraphQL
+operation, then calls its toolkit's cursor pagination definition. Pagination
+checks eligibility and selects the cursor. Transport, endpoint and operation
+details were defined with the per-store API instances; mixed mode keeps people
+ownership separate.
 
 ### 3. The normalized request runner publishes lifecycle actions
 
@@ -227,6 +229,15 @@ execution instead of publishing another started action. The boundary
 response is decoded and normalized before `succeeded`; failures publish
 `failed`, and interruption cleanup can publish `cancelled`.
 Latest-wins ownership guards prevent an older read settling over a newer one.
+
+For factory-owned optimistic mutations, a scope does not supersede a separate
+canonical request: independent fields can settle concurrently even when they
+share a scope. A shared, store-owned optimistic registry rejects overlapping
+field targets before transport. Missing or duplicate targets also fail before
+invalidation probes or other store transitions.
+REST HTTP failures include the status and, when provided as a JSON `error`
+string, the server's message. Malformed JSON error bodies are reported with
+the HTTP failure rather than hiding it.
 
 ### 4. Domain and generated API reducers update data
 
@@ -251,6 +262,32 @@ joins and derives request notices from the same store-owned state.
 The stores own data; the relational projection does not become another write
 authority. Hydrated navigation state remains app-owned, and this workflow
 does not add a second initial browser fetch.
+
+## Factory-owned optimistic writes
+
+Both apps define REST and GraphQL operations in their per-store
+`trackerServices.ts` composition. The task-page query selects the matching
+factory at the workflow boundary; assignee writes use the selected task
+transport, while person renames remain REST operations. Each factory mutation
+declares its decoder, normalizer, invalidation tags and typed field target.
+
+The two transport definitions in a store share an optimistic-ownership
+registry. Their generated optimistic reducers are composed explicitly beside
+the API reducer, so writes through either transport coordinate against the
+same task or person field. Before transport, the factory validates target
+existence and claims every field atomically; an overlapping write returns a
+conflict skip without changing state or calling the transport. Confirmation
+reconciles only still-owned fields, while failure restores their snapshots
+without overwriting unrelated fields. Separate stores use independent
+definitions and ownership registries.
+
+Transport and response boundaries remain observable. REST failures include
+HTTP status, successful receipts precede body parsing, and custom Promise
+transports report the same receipt boundary. A write that may have reached the
+server is distinguishable from a definite preflight failure; malformed response
+data rolls back local optimism but does not imply the server did not commit.
+No automatic refetch is added: the existing successful assignee refresh remains
+an explicit workflow decision.
 
 ## Side-by-side optimistic write: save task status
 
@@ -311,6 +348,7 @@ projects, people or tracker source modes.
 Both request implementations:
 
 - Decode unknown transport data and verify the requested SKU.
+- Construct a GraphQL API per consumer and inject its fetcher at definition time.
 - Normalize entities keyed by SKU.
 - Define their own pending accessors and numeric field transitions.
 - Install the generated API reducer once; explicitly register standalone writes.
@@ -335,10 +373,10 @@ do not copy that simple merge into a concurrent editing app without defining it.
 | Observation from the consumer | Trade-off / recommendation |
 | --- | --- |
 | `createRequestLifecycle<State, Result>()` needs a typed pending accessor to infer input | Explicit ownership is useful; show the accessor near the definition instead of adding a hidden default |
-| `createRequestApi` needs a typed `getState` to anchor standalone state inference | Document the annotation; do not invent initial-state ownership in API definitions |
+| `createGraphqlApi` needs a typed `getState` to anchor standalone state inference | Document the annotation; do not invent initial-state ownership in API definitions |
 | Effect slices return creators from a builder callback; Redux uses its official reducer object | Keep this intentional difference visible rather than forcing a cast-based common abstraction |
 | Read and write action unions compose through `RequestActions` | Use the inferred union for the consumer service; avoid widening it to arbitrary payloads |
-| The API reducer handles every read case; three standalone write cases still require explicit registration | Install the API reducer once; keep domain handlers separate and compose them first |
+| The API reducer handles generated request metadata; standalone write cases still require explicit registration | Install the API reducer once; keep domain handlers separate and compose them first |
 | Runners need only an Effect-valued state/dispatch service | Redux can adapt synchronous store methods without importing the tracker middleware |
 | Core external Effect dispatch uses an application-owned runtime | Dispose it explicitly; service-level request execution can instead compose in a caller-owned Effect |
 | Domain preflight and reducer start guards have different jobs | Keep both visible; do not treat eligibility as generic request mechanics |

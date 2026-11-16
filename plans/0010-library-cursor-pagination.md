@@ -68,9 +68,9 @@ generated request reducers and shared in-flight reads.
 ## Implemented outcome
 
 Each toolkit provides its own headless `createCursorPagination` definition.
-The tracker apps use it with their generated query's `runWithResult`, which
-shares the existing execution registry with `run` and exposes normalized data
-only for an eligible success. The pagination reducer commits domain merging and
+The tracker apps use it with their generated query's `initiate`, which shares
+the existing execution registry and exposes normalized data only for an
+eligible success. The pagination reducer commits domain merging and
 cursor advancement together. Tracker `result.pageInfo` remains the snapshot of
 the last successful response and seeds hydration; pagination state owns
 execution decisions. Consumers must not separately merge generated query success

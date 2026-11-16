@@ -155,35 +155,51 @@ records before/after state, duration and synchronous action failures in closed
 console groups. It never logs Effect programs. Redux DevTools likewise receives
 the ordinary actions forwarded through Redux.
 
-## Transport-neutral request lifecycles
+## Request APIs and optimistic mutations
 
-Each app composes a separate `createRequestApi` implementation. The reusable
-engines and their tests live in `@repo/redux-toolkit` and
-`@repo/effect-store-toolkit`. Both independently generate Immer request metadata
-reducers; standalone write cases use their respective slice builders.
-Only HTTP transport, variable identities and entity utilities are shared
-between the two engines.
+Each toolkit independently exposes `createRestApi` and `createGraphqlApi`.
+The Redux implementations live in `@repo/redux-toolkit`; the Effect-first
+implementations live in `@repo/effect-store-toolkit`. Each factory defines typed
+operations, decoding, normalization, request scopes and transport at definition
+time. REST operations declare method, path, query and optional JSON body;
+GraphQL operations declare a document, optional operation name and variables.
+Custom transports can return arbitrary Promises, but use the same explicit
+response-receipt contract as built-in HTTP transports.
 
-Normalized query/mutation operations define variables, decoding, normalization
-and request scopes. GraphQL uses a document and endpoint; REST or other transports
-supply an `execute` callback instead. `createRequestApi` returns definitions,
-action creators and a generated `reducer(state, action)`, with no domain
-initial-state factory. Its `getState`
-accessor supplies the application state type; `state` locates request metadata
-within an Immer draft.
+Apps create stable factory instances per store, inject test or app-specific
+transports during construction, and pass only the store service and variables
+when running an operation. Generated endpoints use the headless
+`endpoints.<name>.initiate(variables)` and `endpoints.<name>.select(variables)`
+shape: `initiate` returns a dispatchable Effect, and `select` returns request
+metadata for the supplied state. Normalized domain data remains app-owned.
+Each API also returns generated actions and a reducer for request metadata; it
+does not own domain initial state or install itself into a store. The receiving
+store explicitly composes the API reducer and any domain or optimistic reducers.
 
 The generated API reducer manages `requests` and `latest` metadata for every
-defined operation. Install it once in the receiving store's reducer composition;
-no per-action registration or domain callbacks are needed for execution.
+defined operation. Duplicate pending reads share an execution for the same
+operation, stable store service and canonical key. Duplicate mutations skip;
+factory-owned optimistic targets additionally prevent overlapping writes across
+REST and GraphQL factory instances in the same store. Separate stores have
+separate definitions, workers and ownership claims.
 
-Each operation's optional `reducer({ onStarted, onSuccess, onFailure })` returns a
-separate guarded domain reducer. Compose domain reducers before the generated
+Factory mutations may declare typed field targets and reconciliation. Their
+guarded optimistic reducer snapshots and applies all claimed fields atomically,
+then confirms or rolls back only fields still owned by that request. Apps still
+own target selection, domain validation, entity access and result reconciliation.
+Preflight, conflict, uncertain-commit, incomplete-rollback and post-commit
+outcomes remain distinguishable; these mechanics do not add automatic
+invalidation-driven refetch. Standalone request lifecycles remain available for
+workflows that do not use a factory mutation.
+
+Each operation's optional `reducer({ onStarted, onSuccess, onFailure })` returns
+a separate guarded domain reducer. Compose domain reducers before the generated
 API reducer so both inspect pre-transition ownership.
 
 For tracker pages, the domain handler records loading and errors, while
 `createCursorPagination` owns the page merge and cursor advancement together.
-The workflow calls the generated query's `runWithResult`; its success handler
-does not merge the page early. See the
+The workflow calls the generated query's `initiate`; its success handler does
+not merge the page early. See the
 [cursor contract](docs/prove-the-layers.md#cursor-pagination) for why this
 ordering matters.
 
@@ -255,8 +271,12 @@ tracker apps seed their hydrated chain and retain their existing explicit
 post-write refreshes; injected status and priority persistence still does not
 refresh automatically.
 
-CRUD writes and people reads instead use standalone
+Non-factory CRUD writes and status/priority writes use standalone
 `createRequestLifecycle<State, Result>()(prefix, { pending })` definitions.
+The Effect-first people read also uses a standalone lifecycle. The Redux-first
+mixed-mode people read is a REST factory query, so its path, decoding and
+configured transport are defined with that store's API; its operation reducer
+updates the app-owned people loading state and entities.
 Constructing a lifecycle generates started/confirmed/failed action creators and
 an Effect-valued runner, but installs no reducers and requires no `state.api`
 metadata. Each run takes `store`, `input` and an abort-aware `execute(signal)`
@@ -290,7 +310,7 @@ without rebuilding request metadata. Each app keeps definitions in
 `trackerOperations.ts` and its transitions and registrations in
 `trackerOperationReducers.ts`.
 
-For status, priority and assignee, the optional
+For status and priority, the optional
 `createOptimisticFieldReducers<State, Input>()` helper supplies those value
 transitions. The app selects the mutable field and its write table, extracts
 the optimistic value and supplies an explicit `canStart` rule. The helper
@@ -302,8 +322,9 @@ write. Creation, deletion and detail merging do not use this field helper.
 
 Operation inputs reuse named domain contracts. Status, priority and assignee
 all use `{ taskId, value }` through `TaskFieldInput<Value>`; assignee values may
-be null. Results remain typed domain entities or field values, not reconstructed
-lifecycle payloads.
+be null. Assignee writes use the API factory's optimistic lifecycle, while
+status and priority retain their standalone workflows. Results remain typed
+domain entities or field values, not reconstructed lifecycle payloads.
 
 ### Domain validation pattern
 
@@ -338,13 +359,14 @@ server. Creation retry and person rename rules remain in their existing workflow
 
 ### Request execution
 
-The runner rejects duplicate pending claims, guards settlements against stale
-owners and cleans up on interruption or publication failure. The app defines
-its pending record accessor, optimistic transitions, authoritative merge and
-rollback. Independent fields retain independent ownership; reducer state
-contains data only. Domain actions such as `tracker/statusStarted` remain
-visible in the log. If no started handler claims ownership in the receiving
-store, execution fails explicitly rather than performing an untracked write.
+Factory runners reject duplicate pending mutations, claim optimistic targets
+before transport, guard settlements against stale owners and clean up on
+interruption or publication failure. Standalone lifecycle runners continue to
+use app-defined pending accessors and transitions. Independent fields retain
+independent ownership; reducer state contains data only. Domain actions such as
+`tracker/statusStarted` remain visible in the log. If required reducer or
+invalidation ownership is missing, execution fails explicitly rather than
+performing an untracked write.
 
 This is the same separation of execution/lifecycle generation from reducer
 behavior that `createAsyncThunk` provides, using Effect execution for both stores

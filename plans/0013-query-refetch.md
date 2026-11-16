@@ -1,6 +1,6 @@
-# 0012: Query refetch
+# 0013: Query refetch
 
-**Status: TO BE IMPLEMENTED**
+**Status: PROVISIONAL — NOT READY FOR IMPLEMENTATION**
 
 ## Goal
 
@@ -17,6 +17,10 @@ while consumers retain control of transport, normalized data and domain merges.
 - Plan 0011 must establish query identity, dependency matching, observable
   stale revisions and read/invalidation race semantics before this plan is
   implemented. Resolve any remaining interface gaps before coding.
+- [Plan 0012](0012-rest-graphql-api-factories.md) replaces the generated API
+  factories and establishes per-store definitions. Revisit execution ownership,
+  transport capture and migration against its implemented contract before
+  making this plan development-ready.
 - Generated queries are lazy Effects; matching in-flight reads share execution
   only for the same operation, canonical variables and stable receiving store
   service. They do not retain a response cache or enough execution context to

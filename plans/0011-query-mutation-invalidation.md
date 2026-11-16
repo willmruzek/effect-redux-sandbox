@@ -10,7 +10,7 @@ and observe which results need a fresh read without deleting visible data or
 creating an endpoint response cache.
 
 This plan adds no automatic refetch. It establishes the contract used by
-[plan 0012](0012-query-refetch.md), which remains a separate plan with its own
+[plan 0013](0013-query-refetch.md), which remains a separate plan with its own
 unresolved decisions.
 
 ## Existing behavior and boundaries
@@ -199,7 +199,7 @@ unresolved decisions.
 
 Both tracker apps and independent request toolkits implement explicit typed
 invalidation, chain freshness and guarded settlement. Invalidation does not
-automatically refetch; [plan 0012](0012-query-refetch.md) remains separate.
+automatically refetch; [plan 0013](0013-query-refetch.md) remains separate.
 Public-consumer tests cover store isolation, shared APIs, interrupted waiters,
 write outcomes and page publication races. The final workspace lint,
 type-check, test and build commands passed, including 732 tests.
