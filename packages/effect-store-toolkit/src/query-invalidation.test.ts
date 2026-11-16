@@ -1,9 +1,9 @@
 import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
 
+import { createApiCore } from './engine.js';
 import {
   createInvalidationRegistry,
-  createRequestApi,
   type InvalidationAction,
   type InvalidationState,
   type RequestActions,
@@ -19,19 +19,38 @@ type State = {
   readonly invalidation: InvalidationState<'Task'>;
 };
 
-function setup(invalidateBeforeSuccess = false, invalidateAfterStart = false) {
+function setup(
+  execute: (variables: Variables, signal: AbortSignal) => Promise<Result>,
+  invalidateBeforeSuccess = false,
+  invalidateAfterStart = false,
+) {
   const registry = createInvalidationRegistry<State, 'Task'>()({
     name: 'tracker',
     getState: (state) => state.invalidation,
     setState: (state, invalidation) => ({ ...state, invalidation }),
   });
-  const api = createRequestApi({
+  const api = createApiCore({
     name: 'trackerApi',
+    endpoint: '/graphql',
     getState: (state: State) => state.api,
     state: (state) => state.api,
-    operations: (builder) => ({
+    endpoints: (builder) => ({
       detail: builder.query('detail', {
-        decode: (): Result => ({ id: 'a', value: 'decoded' }),
+        document: 'query Detail { detail }',
+        transport: async (variables: Variables, signal) => {
+          const result = await execute(variables, signal);
+          return { status: 'received', read: async () => result };
+        },
+        decode: (data: unknown): Result => {
+          if (
+            typeof data !== 'object' || data === null ||
+            !('id' in data) || typeof data.id !== 'string' ||
+            !('value' in data) || typeof data.value !== 'string'
+          )
+            throw new Error('Invalid result.');
+
+          return { id: data.id, value: data.value };
+        },
         normalize: (value: Result) => value,
         provides: {
           registry,
@@ -41,7 +60,7 @@ function setup(invalidateBeforeSuccess = false, invalidateAfterStart = false) {
       }),
     }),
   });
-  const detail = api.operations.detail.reducer({
+  const detail = api.endpoints.detail.reducer({
     onSuccess: (state, payload) => {
       state.value = payload.result.value;
     },
@@ -53,8 +72,8 @@ function setup(invalidateBeforeSuccess = false, invalidateAfterStart = false) {
   };
   const store = {
     getState: Effect.sync(() => state),
-    dispatch: (action: RequestActions<typeof api.operations> | InvalidationAction<'Task'>) => Effect.sync(() => {
-      if (invalidateBeforeSuccess && action.type === api.operations.detail.actions.succeeded.type) {
+    dispatch: (action: RequestActions<typeof api.endpoints> | InvalidationAction<'Task'>) => Effect.sync(() => {
+      if (invalidateBeforeSuccess && action.type === api.endpoints.detail.actions.succeeded.type) {
         state = registry.reducer(state, registry.actions.invalidate({
           tags: [{ type: 'Task', id: 'a' }],
         }));
@@ -76,44 +95,45 @@ function setup(invalidateBeforeSuccess = false, invalidateAfterStart = false) {
 describe('generated query invalidation', () => {
   test('supersedes a read when a result-derived tag was invalidated before it settled', async () => {
     // Arrange: the result reveals a dependency not known when the read starts.
-    const { api, registry, store, snapshot } = setup();
+    let invalidate: () => Promise<void> = async () => { throw new Error('Registry is not initialized.'); };
+    const { api, registry, store, snapshot } = setup(async () => {
+      await invalidate();
+      return { id: 'a', value: 'obsolete' };
+    });
+    invalidate = async () => {
+      await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'Task', id: 'a' }] }));
+    };
 
     // Act: invalidate the returned task before delivering the result.
-    const result = await Effect.runPromise(api.operations.detail.run({
+    const result = await Effect.runPromise(api.endpoints.detail.run({
       store,
       variables: { id: 'a' },
-      execute: async () => {
-        await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'Task', id: 'a' }] }));
-        return { id: 'a', value: 'obsolete' };
-      },
     }));
 
     // Assert: stale data is not merged and the query is marked stale.
     expect(result).toEqual({ status: 'superseded' });
     expect(snapshot().value).toBe('original');
-    expect(api.operations.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('stale');
+    expect(api.endpoints.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('stale');
   });
 
   test('supersedes metadata when invalidation occurs at the success publication boundary', async () => {
     // Arrange: middleware invalidates the result just before the success reducer runs.
-    const { api, store, snapshot } = setup(true);
+    const { api, store, snapshot } = setup(async () => ({ id: 'a', value: 'obsolete' }), true);
 
     // Act: complete the query.
-    const result = await Effect.runPromise(api.operations.detail.run({
+    const result = await Effect.runPromise(api.endpoints.detail.run({
       store,
       variables: { id: 'a' },
-      execute: async () => ({ id: 'a', value: 'obsolete' }),
     }));
 
     // Assert: neither domain state nor metadata records a successful read.
     expect(result).toEqual({ status: 'superseded' });
     expect(snapshot().value).toBe('original');
-    expect(api.operations.detail.selectRequest(snapshot(), { id: 'a' })?.status).toBe('superseded');
+    expect(api.endpoints.detail.selectRequest(snapshot(), { id: 'a' })?.status).toBe('superseded');
   });
 
   test('starts a new worker after invalidation rather than joining the older read', async () => {
     // Arrange: the first worker waits while an unknown result tag is invalidated.
-    const { api, registry, store, snapshot } = setup();
     let release: (result: Result) => void = () => {
       throw new Error('Response resolver is not initialized.');
     };
@@ -121,74 +141,78 @@ describe('generated query invalidation', () => {
     const started = new Promise<void>((resolve) => {
       notifyStarted = resolve;
     });
-    const old = Effect.runPromise(api.operations.detail.run({
-      store,
-      variables: { id: 'a' },
-      execute: () => new Promise<Result>((resolve) => {
+    let executions = 0;
+    const { api, registry, store, snapshot } = setup(async () => {
+      executions += 1;
+      if (executions > 1)
+        return { id: 'a', value: 'new' };
+
+      return new Promise<Result>((resolve) => {
         release = resolve;
         notifyStarted();
-      }),
+      });
+    });
+    const old = Effect.runPromise(api.endpoints.detail.run({
+      store,
+      variables: { id: 'a' },
     }));
     await started;
     await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'Task', id: 'a' }] }));
-    let newerExecutions = 0;
 
     // Act: issue the same query after invalidation, then finish the old worker.
-    const newer = Effect.runPromise(api.operations.detail.run({
+    const newer = Effect.runPromise(api.endpoints.detail.run({
       store,
       variables: { id: 'a' },
-      execute: async () => {
-        newerExecutions += 1;
-        return { id: 'a', value: 'new' };
-      },
     }));
     await Effect.runPromise(Effect.yieldNow);
     release({ id: 'a', value: 'old' });
     const [oldResult, newResult] = await Promise.all([old, newer]);
 
     // Assert: the newer worker wins and the old worker cannot overwrite it.
-    expect(newerExecutions).toBe(1);
+    expect(executions).toBe(2);
     expect(oldResult).toEqual({ status: 'superseded' });
     expect(newResult).toEqual({ status: 'succeeded' });
     expect(snapshot().value).toBe('new');
-    expect(api.operations.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('fresh');
+    expect(api.endpoints.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('fresh');
   });
 
   test('supersedes a read invalidated immediately after dependency registration', async () => {
     // Arrange: a subscriber invalidates a variable-derived tag at read start.
-    const { api, store, snapshot } = setup(false, true);
+    const { api, store, snapshot } = setup(async () => ({ id: 'a', value: 'obsolete' }), false, true);
 
     // Act: complete the query after the invalidation.
-    const result = await Effect.runPromise(api.operations.detail.run({
+    const result = await Effect.runPromise(api.endpoints.detail.run({
       store,
       variables: { id: 'a' },
-      execute: async () => ({ id: 'a', value: 'obsolete' }),
     }));
 
     // Assert: registration succeeded, but the result cannot be merged.
     expect(result).toEqual({ status: 'superseded' });
     expect(snapshot().value).toBe('original');
-    expect(api.operations.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('stale');
+    expect(api.endpoints.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('stale');
   });
 
   test('accepts a read when only unrelated tags were invalidated', async () => {
     // Arrange: the query starts without an established result.
-    const { api, registry, store, snapshot } = setup();
-    expect(api.operations.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('uninitialized');
+    let invalidate: () => Promise<void> = async () => { throw new Error('Registry is not initialized.'); };
+    const { api, registry, store, snapshot } = setup(async () => {
+      await invalidate();
+      return { id: 'a', value: 'current' };
+    });
+    invalidate = async () => {
+      await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'Task', id: 'b' }] }));
+    };
+    expect(api.endpoints.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('uninitialized');
 
     // Act: invalidate another task before returning this result.
-    const result = await Effect.runPromise(api.operations.detail.run({
+    const result = await Effect.runPromise(api.endpoints.detail.run({
       store,
       variables: { id: 'a' },
-      execute: async () => {
-        await Effect.runPromise(registry.invalidate({ store, tags: [{ type: 'Task', id: 'b' }] }));
-        return { id: 'a', value: 'current' };
-      },
     }));
 
     // Assert: unrelated invalidation does not prevent a fresh merge.
     expect(result).toEqual({ status: 'succeeded' });
     expect(snapshot().value).toBe('current');
-    expect(api.operations.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('fresh');
+    expect(api.endpoints.detail.selectFreshness(snapshot(), { id: 'a' })).toBe('fresh');
   });
 });

@@ -24,9 +24,13 @@ type Action = {
   readonly message: string
 };
 
+type StoreServices = {
+  readonly label: string;
+};
+
 class Messages extends Context.Service<
   Messages,
-  StoreService<State, Action, Messages>
+  StoreService<State, Action, Messages, StoreServices>
 >()('test/Messages') { }
 
 const runtimes: ManagedRuntime.ManagedRuntime<never, never>[] = [];
@@ -44,6 +48,32 @@ afterEach(async () => {
 });
 
 describe('createStore', () => {
+  test('provides per-store application services to effects', async () => {
+    // Arrange: attach application services to a store-specific context.
+    const store = createStore({
+      runtime: runtime(),
+      service: Messages,
+      services: { label: 'first store' },
+      initialState: { message: 'initial' },
+
+      reducer: ({ state }: Readonly<{
+        state: State;
+        action: Action
+      }>): State => state,
+    });
+    const program = Effect.gen(function*() {
+      const store = yield* Messages;
+
+      return store.label;
+    });
+
+    // Act: read the per-store service from an Effect.
+    const result = store.dispatch(program);
+
+    // Assert: the store provides the configured services.
+    await expect(result).resolves.toBe('first store');
+  });
+
   test('infers typed snapshots from a non-counter reducer', async () => {
     // Arrange: define a store with a different state and action shape.
     const store = createStore({

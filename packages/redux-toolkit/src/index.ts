@@ -8,7 +8,13 @@ export {
 
 export { createEntityTable, requestGraphql } from '@repo/gql-api';
 
-export { createRequestApi } from './engine.js';
+export { createRestApi } from './restApi.js';
+export { createGraphqlApi } from './graphqlApi.js';
+export type { TransportReceipt } from './transport.js';
+export {
+  createOptimisticOwnership,
+  type OptimisticTarget,
+} from './optimisticOwnership.js';
 export {
   createInvalidationRegistry,
   type InvalidationAction,
@@ -32,5 +38,6 @@ export type {
   RequestOutcome,
   RequestResult,
   ApiRequest,
-  RequestApiOptions
+  RequestApiOptions,
+  Store,
 } from './engine.js';

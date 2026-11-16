@@ -1,6 +1,7 @@
 export * from './slice.js';
 
 export * from './requests.js';
+export type { Store } from './engine.js';
 
 export { validateCursorPage } from './cursor.js';
 export {
@@ -14,6 +15,10 @@ export {
 
 export { createRequestLifecycle } from './lifecycle.js';
 export { PostCommitError } from './postCommitError.js';
+export {
+  createOptimisticOwnership,
+  type OptimisticTarget,
+} from './optimisticOwnership.js';
 export {
   createInvalidationRegistry,
   type InvalidationAction,

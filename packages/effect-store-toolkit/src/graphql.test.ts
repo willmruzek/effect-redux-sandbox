@@ -1,4 +1,7 @@
-import { Effect } from 'effect';
+import {
+  Context,
+  Effect,
+} from 'effect';
 import {
   describe,
   expect,
@@ -8,11 +11,12 @@ import {
 } from 'vitest';
 
 import {
-  createRequestApi,
+  createGraphqlApi,
+  createEntityTable,
   type RequestApiState,
   type RequestActions,
-} from './requests.js';
-import { createEntityTable } from './index.js';
+  type Store,
+} from './index.js';
 
 type Person = {
   readonly id: string;
@@ -26,6 +30,34 @@ type State = {
   readonly people: Readonly<Record<string, Person>>;
   readonly selected: string | null;
 };
+
+class ApiStore extends Context.Service<ApiStore, Store<State, { readonly type: string }>>()('test/graphql/ApiStore') {}
+
+type Fence = Readonly<{ identity: string; requestId: string }>;
+
+function runEndpoint<StoreId, StoreShape, Variables extends object, Result>(
+  endpoint: {
+    readonly initiate: (
+      variables: Variables,
+      options?: Readonly<{ fence?: Fence }>,
+    ) => Effect.Effect<Result, Error, StoreId>;
+  },
+  storeService: Context.Service<StoreId, StoreShape>,
+  input: {
+    readonly store: StoreShape;
+    readonly variables: Variables;
+    readonly fence?: Fence;
+  },
+): Effect.Effect<Result, Error> {
+  return Effect.provideService(
+    endpoint.initiate(
+      input.variables,
+      input.fence ? { fence: input.fence } : undefined,
+    ),
+    storeService,
+    input.store,
+  );
+}
 
 function decode(data: unknown): Person {
   if (
@@ -45,21 +77,35 @@ function decode(data: unknown): Person {
   return { id: data.person.id, name: data.person.name };
 }
 
-function setup({ failPublication = false } = {}) {
+function setup({
+  failPublication = false,
+  endpoint = '/graphql',
+  headers,
+  fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
+    Response.json({ data: { person: { id: '1', name: 'Pat' } } })),
+}: {
+  readonly failPublication?: boolean;
+  readonly endpoint?: string;
+  readonly headers?: HeadersInit;
+  readonly fetcher?: ReturnType<typeof vi.fn<(url: string, init: RequestInit) => Promise<Response>>>;
+} = {}) {
   const people = createEntityTable({
     name: 'people',
 
     key: (person: Person) => person.id
   });
-  const definition = createRequestApi({
+  const definition = createGraphqlApi({
     name: 'peopleApi',
-    endpoint: '/graphql',
+    endpoint,
+    fetcher,
+    storeService: ApiStore,
+    ...(headers ? { headers } : {}),
 
     state: (state) => state.api,
 
     getState: (state: State) => state.api,
 
-    operations: (api) => ({
+    endpoints: (api) => ({
       person: api.query('person', {
         document: 'query Person($id: ID!) { person(id: $id) { id name } }',
         operationName: 'Person',
@@ -87,7 +133,7 @@ function setup({ failPublication = false } = {}) {
       }),
     }),
   });
-  const person = definition.operations.person.reducer({
+  const person = definition.endpoints.person.reducer({
     onSuccess: (state, { result, variables }) => {
       if (failPublication)
         throw new Error('Entity merge failed');
@@ -96,7 +142,7 @@ function setup({ failPublication = false } = {}) {
       state.selected = variables.id;
     },
   });
-  const rename = definition.operations.rename.reducer({
+  const rename = definition.endpoints.rename.reducer({
     onSuccess: (state, { result }) => {
       state.people = people.merge({ current: state.people, incoming: result });
     },
@@ -109,18 +155,15 @@ function setup({ failPublication = false } = {}) {
       definition.reducer(rename(person(state, action), action), action),
   };
   let state = api.getInitialState();
-  const actions: RequestActions<typeof api.operations>[] = [];
-  const store = {
+  const actions: RequestActions<typeof api.endpoints>[] = [];
+  const store: ApiStore['Service'] = {
     getState: Effect.sync(() => state),
 
-    dispatch: (action: RequestActions<typeof api.operations>) => Effect.sync(() => {
+    dispatch: (action: RequestActions<typeof api.endpoints>) => Effect.sync(() => {
       actions.push(action);
       state = api.reducer({ state, action });
     }),
   };
-  const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
-    Response.json({ data: { person: { id: '1', name: 'Pat' } } }));
-
   return {
     api,
     store,
@@ -146,16 +189,15 @@ function deferredResponse() {
   };
 }
 
-describe('createRequestApi', () => {
+describe('GraphQL API', () => {
   test('returns the normalized result through result-bearing query execution', async () => {
     // Arrange: use a generated query with a typed normalized response.
-    const { api, store, fetcher } = setup();
+    const { api, store } = setup();
 
     // Act: execute the result-bearing query.
-    const result = await Effect.runPromise(api.operations.person.runWithResult({
+    const result = await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       store,
       variables: { id: '1' },
-      fetcher,
     }));
 
     // Assert: the successful result is available without reading store metadata.
@@ -164,17 +206,21 @@ describe('createRequestApi', () => {
 
   test('rejects duplicate operation keys before action types can collide', () => {
     // Arrange: query and mutation definitions attempt to use the same key.
-    const define = () => createRequestApi({
+    const define = () => createGraphqlApi({
       name: 'duplicate',
+      endpoint: '/graphql',
+      storeService: ApiStore,
       getState: (state: State) => state.api,
       state: (state) => state.api,
 
-      operations: (builder) => ({
+      endpoints: (builder) => ({
         first: builder.query('person', {
+          document: 'query Person { person }',
           decode: () => 'saved',
           normalize: (value: string) => value,
         }),
         second: builder.mutation('person', {
+          document: 'mutation Person { person }',
           decode: () => 'saved',
           normalize: (value: string) => value,
         }),
@@ -187,13 +233,18 @@ describe('createRequestApi', () => {
 
   test('does not install reducers or execute unowned requests', async () => {
     // Arrange: definitions alone and a store with no registered handlers.
-    const api = createRequestApi({
+    const execute = vi.fn(async () => ({ id: '1', name: 'Pat' }));
+    const api = createGraphqlApi({
       name: 'unregistered',
+      endpoint: '/graphql',
+      storeService: ApiStore,
       getState: (state: State) => state.api,
       state: (state) => state.api,
 
-      operations: (builder) => ({
+      endpoints: (builder) => ({
         person: builder.query('person', {
+          document: 'query Person { person }',
+          transport: async () => ({ status: 'received', read: execute }),
           decode,
           normalize: (person: Person, variables: Variables) => ({ ...person, id: variables.id }),
         }),
@@ -204,16 +255,14 @@ describe('createRequestApi', () => {
       people: {},
       selected: null,
     };
-    const execute = vi.fn(async () => ({ id: '1', name: 'Pat' }));
 
     // Act: dispatch cannot establish ownership without registered reducers.
-    await expect(Effect.runPromise(api.operations.person.run({
+    await expect(Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       store: {
         getState: Effect.succeed(state),
         dispatch: () => Effect.void,
       },
       variables: { id: '1' },
-      execute,
     }))).rejects.toThrow('Could not claim person request.');
 
     // Assert: definition and execution cannot silently install state behavior.
@@ -236,10 +285,9 @@ describe('createRequestApi', () => {
       } = setup();
 
       // Act: run the query as an Effect using that store's service.
-      const outcome = await Effect.runPromise(api.operations.person.run({
+      const outcome = await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
         variables: { id: '1' },
-        store,
-        fetcher
+        store
       }));
 
       // Assert: normalization and lifecycle state publish through actions.
@@ -258,9 +306,9 @@ describe('createRequestApi', () => {
           variables: { id: '1' },
         }),
       }));
-      expectTypeOf<Parameters<typeof api.operations.person.run>[0]['variables']>().toEqualTypeOf<Variables>();
-      expectTypeOf(api.operations.person.actions.succeeded.type).toEqualTypeOf<'peopleApi/person/succeeded'>();
-      expectTypeOf<Parameters<typeof api.operations.person.actions.succeeded>[0]['result']>()
+      expectTypeOf<Parameters<typeof api.endpoints.person.initiate>[0]>().toEqualTypeOf<Variables>();
+      expectTypeOf(api.endpoints.person.actions.succeeded.type).toEqualTypeOf<'peopleApi/person/succeeded'>();
+      expectTypeOf<Parameters<typeof api.endpoints.person.actions.succeeded>[0]['result']>()
         .toEqualTypeOf<Readonly<Record<string, Person>>>();
     }
   );
@@ -270,44 +318,38 @@ describe('createRequestApi', () => {
     const {
       api,
       store,
-      fetcher,
       snapshot
     } = setup();
 
     // Act: dispatch a mutation.
-    await Effect.runPromise(api.operations.rename.run({
+    await Effect.runPromise(runEndpoint(api.endpoints.rename, ApiStore, {
       variables: { id: '1' },
-      store,
-      fetcher
+      store
     }));
 
     // Assert: no mutation-specific entity cache is created.
     expect(snapshot().people['1']).toEqual({ id: '1', name: 'Pat' });
-    expect(api.operations.rename.kind).toBe('mutation');
+    expect(api.endpoints.rename.kind).toBe('mutation');
   });
 
   test(
     'allows independent variable keys to complete concurrently by default',
     async () => {
       // Arrange: mutations have no shared latest-wins scope by default.
-      const {
-        api,
-        store,
-        snapshot,
-        fetcher
-      } = setup();
       const pending = deferredResponse();
-      const old = Effect.runPromise(api.operations.rename.run({
+      const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+        .mockImplementationOnce(pending.fetcher)
+        .mockResolvedValueOnce(Response.json({ data: { person: { id: '1', name: 'Pat' } } }));
+      const { api, store, snapshot } = setup({ fetcher });
+      const old = Effect.runPromise(runEndpoint(api.endpoints.rename, ApiStore, {
         variables: { id: 'old' },
         store,
-        fetcher: pending.fetcher,
       }));
 
       // Act: complete the newer key before the older one.
-      await Effect.runPromise(api.operations.rename.run({
+      await Effect.runPromise(runEndpoint(api.endpoints.rename, ApiStore, {
         variables: { id: '1' },
-        store,
-        fetcher
+        store
       }));
       pending.resolve(Response.json({ data: { person: { id: 'old', name: 'Earlier' } } }));
 
@@ -324,13 +366,13 @@ describe('createRequestApi', () => {
 
   test('keeps duplicate mutations unshared', async () => {
     // Arrange: a mutation already owns this key.
-    const { api, store } = setup();
     const pending = deferredResponse();
-    const input = { store, variables: { id: '1' }, fetcher: pending.fetcher };
-    const first = Effect.runPromise(api.operations.rename.run(input));
+    const { api, store } = setup({ fetcher: pending.fetcher });
+    const input = { store, variables: { id: '1' } };
+    const first = Effect.runPromise(runEndpoint(api.endpoints.rename, ApiStore, input));
 
     // Act: repeat the mutation before the first response.
-    const result = await Effect.runPromise(api.operations.rename.run(input));
+    const result = await Effect.runPromise(runEndpoint(api.endpoints.rename, ApiStore, input));
     pending.resolve(Response.json({ data: { person: { id: '1', name: 'Pat' } } }));
     await first;
 
@@ -341,19 +383,17 @@ describe('createRequestApi', () => {
 
   test('shares the original outcome for duplicate in-flight queries', async () => {
     // Arrange: the first HTTP request has not resolved.
-    const { api, store } = setup();
     const pending = deferredResponse();
-    const first = Effect.runPromise(api.operations.person.run({
+    const { api, store } = setup({ fetcher: pending.fetcher });
+    const first = Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
-      store,
-      fetcher: pending.fetcher
+      store
     }));
 
     // Act: dispatch another identical query.
-    const second = Effect.runPromise(api.operations.person.run({
+    const second = Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
-      store,
-      fetcher: pending.fetcher
+      store
     }));
 
     await Effect.runPromise(Effect.yieldNow);
@@ -361,30 +401,29 @@ describe('createRequestApi', () => {
     await first;
 
     // Assert: the duplicate does not issue another HTTP request.
-    expect(await second).toEqual({ status: 'succeeded' });
+    expect(await second).toEqual({
+      status: 'succeeded',
+      result: { '1': { id: '1', name: 'Pat' } },
+    });
     expect(pending.fetcher).toHaveBeenCalledTimes(1);
   });
 
   test('ignores a late response from a superseded scope', async () => {
     // Arrange: two variable keys address the same selected-result scope.
-    const {
-      api,
-      store,
-      fetcher,
-      snapshot
-    } = setup();
     const pending = deferredResponse();
-    const first = Effect.runPromise(api.operations.person.run({
+    const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+      .mockImplementationOnce(pending.fetcher)
+      .mockResolvedValueOnce(Response.json({ data: { person: { id: '1', name: 'Pat' } } }));
+    const { api, store, snapshot } = setup({ fetcher });
+    const first = Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: 'old' },
-      store,
-      fetcher: pending.fetcher
+      store
     }));
 
     // Act: the newer query succeeds before the older response arrives.
-    await Effect.runPromise(api.operations.person.run({
+    await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
-      store,
-      fetcher
+      store
     }));
 
     const before = snapshot();
@@ -440,14 +479,12 @@ describe('createRequestApi', () => {
       store,
       snapshot,
       actions
-    } = setup();
+    } = setup({ fetcher: vi.fn(async () => response()) });
 
     // Act: run the operation against the failing boundary.
-    const outcome = await Effect.runPromise(api.operations.person.run({
+    const outcome = await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
       store,
-
-      fetcher: async () => response(),
     }));
 
     // Assert: failed responses never populate normalized tables.
@@ -466,26 +503,22 @@ describe('createRequestApi', () => {
       snapshot
     } = setup();
 
-    await Effect.runPromise(api.operations.person.run({
+    fetcher.mockRejectedValueOnce(new Error('Offline'));
+    await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
       store,
-
-      fetcher: async () => {
-        throw new Error('Offline');
-      },
     }));
 
     // Act: dispatch again after the caller chooses to retry.
-    await Effect.runPromise(api.operations.person.run({
+    await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
-      store,
-      fetcher
+      store
     }));
 
     // Assert: retry succeeds without an automatic timer or refetch.
     expect(Object.keys(snapshot().api.requests)).toHaveLength(1);
     expect(Object.values(snapshot().api.requests)[0]?.status).toBe('succeeded');
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   test('does not share request state between independent stores', async () => {
@@ -494,10 +527,9 @@ describe('createRequestApi', () => {
     const second = setup();
 
     // Act: only the first store dispatches a query.
-    await Effect.runPromise(first.api.operations.person.run({
+    await Effect.runPromise(runEndpoint(first.api.endpoints.person, ApiStore, {
       variables: { id: '1' },
       store: first.store,
-      fetcher: first.fetcher,
     }));
 
     // Assert: there is no module-level request cache.
@@ -507,50 +539,47 @@ describe('createRequestApi', () => {
 
   test('uses the same API definition concurrently in independent stores', async () => {
     // Arrange: one API definition is shared, but ownership belongs to each store.
-    const first = setup();
-    const second = setup();
     const pending = deferredResponse();
-    const running = Effect.runPromise(first.api.operations.person.run({
+    const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+      .mockImplementationOnce(pending.fetcher)
+      .mockResolvedValueOnce(Response.json({ data: { person: { id: '1', name: 'Pat' } } }));
+    const first = setup({ fetcher });
+    const second = setup();
+    const running = Effect.runPromise(runEndpoint(first.api.endpoints.person, ApiStore, {
       variables: { id: '1' },
       store: first.store,
-      fetcher: pending.fetcher,
     }));
 
     // Act: the second store requests the same variable key independently.
-    await Effect.runPromise(first.api.operations.person.run({
+    await Effect.runPromise(runEndpoint(first.api.endpoints.person, ApiStore, {
       variables: { id: '1' },
       store: second.store,
-      fetcher: second.fetcher,
     }));
     pending.resolve(Response.json({ data: { person: { id: '1', name: 'First store' } } }));
     await running;
 
     // Assert: request deduplication never crosses store/SSR boundaries.
-    expect(second.fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
     expect(first.snapshot().people['1']?.name).toBe('First store');
     expect(second.snapshot().people['1']?.name).toBe('Pat');
   });
 
   test('ignores a late failure from a superseded scope', async () => {
     // Arrange: the old request will fail after the replacement finishes.
-    const {
-      api,
-      store,
-      fetcher,
-      snapshot
-    } = setup();
     const pending = deferredResponse();
-    const first = Effect.runPromise(api.operations.person.run({
+    const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+      .mockImplementationOnce(pending.fetcher)
+      .mockResolvedValueOnce(Response.json({ data: { person: { id: '1', name: 'Pat' } } }));
+    const { api, store, snapshot } = setup({ fetcher });
+    const first = Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: 'old' },
       store,
-      fetcher: pending.fetcher,
     }));
 
     // Act: replace the old request, then receive its GraphQL error.
-    await Effect.runPromise(api.operations.person.run({
+    await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
-      store,
-      fetcher
+      store
     }));
 
     const current = snapshot();
@@ -569,15 +598,13 @@ describe('createRequestApi', () => {
     const {
       api,
       store,
-      fetcher,
       snapshot
     } = setup();
 
     // Act: normalization rejects the response.
-    const outcome = await Effect.runPromise(api.operations.person.run({
+    const outcome = await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: 'wrong' },
       store,
-      fetcher,
     }));
 
     // Assert: a failed mapping is visible in request state, not partial entities.
@@ -587,13 +614,6 @@ describe('createRequestApi', () => {
 
   test('aborts HTTP and releases request ownership when interrupted', async () => {
     // Arrange: the transport waits indefinitely until its signal is aborted.
-    const {
-      api,
-      store,
-      snapshot,
-      actions,
-      fetcher
-    } = setup();
     let started: () => void = () => {
       throw new Error('Waiter not initialized');
     };
@@ -610,10 +630,13 @@ describe('createRequestApi', () => {
 
       return new Promise(() => { });
     };
-    const cancel = Effect.runCallback(api.operations.person.run({
+    const fetcher = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
+      Response.json({ data: { person: { id: '1', name: 'Pat' } } }))
+      .mockImplementationOnce(waiting);
+    const { api, store, snapshot, actions } = setup({ fetcher });
+    const cancel = Effect.runCallback(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
       store,
-      fetcher: waiting,
     }));
 
     await ready;
@@ -623,10 +646,9 @@ describe('createRequestApi', () => {
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
     const cancelled = Object.values(snapshot().api.requests)[0];
-    const retry = await Effect.runPromise(api.operations.person.run({
+    const retry = await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
-      store,
-      fetcher
+      store
     }));
 
     // Assert: cancellation is logged and cannot leave a permanent in-flight lock.
@@ -643,7 +665,7 @@ describe('createRequestApi', () => {
     const second = { extra: { b: 2, a: 1 }, id: '1' };
 
     // Act: compute both request identities.
-    const keys = [api.operations.person.key(first), api.operations.person.key(second)];
+    const keys = [api.endpoints.person.key(first), api.endpoints.person.key(second)];
 
     // Assert: GraphQL object field order does not create duplicate state.
     expect(keys[0]).toBe(keys[1]);
@@ -660,24 +682,21 @@ describe('createRequestApi', () => {
     variables.self = variables;
 
     // Act / Assert: report invalid input instead of producing an ambiguous key.
-    expect(() => api.operations.person.key(variables)).toThrow('GraphQL variables must be acyclic JSON values.');
+    expect(() => api.endpoints.person.key(variables)).toThrow('GraphQL variables must be acyclic JSON values.');
   });
 
-  test('merges request headers while enforcing the GraphQL media type', async () => {
-    // Arrange: callers supply per-request headers such as auth or tenant metadata.
+  test('uses the factory endpoint and headers with the GraphQL media type', async () => {
+    // Arrange: define endpoint and tenant metadata when creating the API.
     const {
       api,
       store,
       fetcher
-    } = setup();
+    } = setup({ endpoint: '/tenant/graphql', headers: { 'x-demo-tenant': 'demo' } });
 
-    // Act: execute with a custom endpoint and header.
-    await Effect.runPromise(api.operations.person.run({
+    // Act: execute the centrally configured operation.
+    await Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
       store,
-      fetcher,
-      endpoint: '/tenant/graphql',
-      headers: { 'x-demo-tenant': 'demo', 'content-type': 'text/plain' },
     }));
 
     // Assert: transport customization does not break JSON GraphQL requests.
@@ -698,15 +717,13 @@ describe('createRequestApi', () => {
     const {
       api,
       store,
-      snapshot,
-      fetcher
+      snapshot
     } = setup({ failPublication: true });
 
     // Act / Assert: preserve the defect, but do not leave the request locked.
-    await expect(Effect.runPromise(api.operations.person.run({
+    await expect(Effect.runPromise(runEndpoint(api.endpoints.person, ApiStore, {
       variables: { id: '1' },
       store,
-      fetcher,
     }))).rejects.toThrow('Entity merge failed');
     expect(snapshot().people).toEqual({});
     expect(Object.values(snapshot().api.requests)[0]?.status).toBe('failed');
