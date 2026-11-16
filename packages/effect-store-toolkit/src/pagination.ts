@@ -49,7 +49,7 @@ type PaginationOptions<State, Cursor, Page, Name extends string, Action> = {
   };
 };
 
-type RunInput<State, Cursor, Page, Action = never> = {
+type RunInput<State, Cursor, Page, Action = never, Requirements = never> = {
   readonly store: {
     readonly getState: Effect.Effect<State>;
     readonly dispatch: (action: PaginationAction<Cursor, Page> | Action) => Effect.Effect<unknown>;
@@ -62,7 +62,7 @@ type RunInput<State, Cursor, Page, Action = never> = {
     readonly query: (
       after: Cursor | null,
       request: PaginationRequest<Cursor>,
-    ) => Effect.Effect<RequestResult<Page>, Error>;
+    ) => Effect.Effect<RequestResult<Page>, Error, Requirements>;
   }
 );
 
@@ -128,10 +128,10 @@ export function createCursorPagination<State, Cursor, Page>() {
       });
     }
 
-    const run = Effect.fnUntraced(function*(
-      input: RunInput<State, Cursor, Page, Action>,
+    const run = Effect.fnUntraced(function*<Requirements>(
+      input: RunInput<State, Cursor, Page, Action, Requirements>,
       mode: 'next' | 'refresh',
-    ): Effect.fn.Return<PaginationOutcome, Error> {
+    ): Effect.fn.Return<PaginationOutcome, Error, Requirements> {
       if (invalidation)
         yield* invalidation.registry.ensureInstalled({ store: input.store });
 
@@ -174,7 +174,11 @@ export function createCursorPagination<State, Cursor, Page>() {
       };
       let registered = false;
 
-      const perform = Effect.fnUntraced(function*(): Effect.fn.Return<PaginationOutcome, Error> {
+      const perform = Effect.fnUntraced(function*(): Effect.fn.Return<
+        PaginationOutcome,
+        Error,
+        Requirements
+      > {
         yield* input.store.dispatch({ type, kind: 'started', request });
 
         if (options.getState(yield* input.store.getState).pending?.requestId !== request.requestId)
@@ -315,8 +319,10 @@ export function createCursorPagination<State, Cursor, Page>() {
 
         return invalidation.registry.select(state, key(identity));
       },
-      next: (input: RunInput<State, Cursor, Page, Action>) => run(input, 'next'),
-      refresh: (input: RunInput<State, Cursor, Page, Action>) => run(input, 'refresh'),
+      next: <Requirements>(input: RunInput<State, Cursor, Page, Action, Requirements>) =>
+        run(input, 'next'),
+      refresh: <Requirements>(input: RunInput<State, Cursor, Page, Action, Requirements>) =>
+        run(input, 'refresh'),
     };
   };
 }

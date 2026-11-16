@@ -1,10 +1,10 @@
 import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
 
+import { createApiCore } from './engine.js';
 import {
   createCursorPagination,
   createInvalidationRegistry,
-  createRequestApi,
   type CursorPaginationState,
   type InvalidationAction,
   type InvalidationState,
@@ -87,12 +87,15 @@ describe('cursor chain invalidation', () => {
       getState: (state) => state.invalidation,
       setState: (state, invalidation) => ({ ...state, invalidation }),
     });
-    const api = createRequestApi({
+    const api = createApiCore({
       name: 'tracker',
-      state: (state: QueryState) => state.api,
-      getState: (state) => state.api,
-      operations: (builder) => ({
+      endpoint: '/graphql',
+      state: (state) => state.api,
+      getState: (state: QueryState) => state.api,
+      endpoints: (builder) => ({
         page: builder.query('page', {
+          document: 'query Page { page }',
+          transport: async () => ({ status: 'received', read: async () => ({ ids: ['new'], cursor: 'two' }) }),
           decode: (data: unknown, variables: { readonly after: string | null }): Page => ({
             ids: data === null || variables.after === null ? [] : [variables.after], cursor: null,
           }),
@@ -106,7 +109,7 @@ describe('cursor chain invalidation', () => {
         }),
       }),
     });
-    const pageReducer = api.operations.page.reducer({
+    const pageReducer = api.endpoints.page.reducer({
       onSuccess: (state) => { state.queryMerges += 1; },
     });
     const pagination = createCursorPagination<QueryState, string, Page>()({
@@ -144,11 +147,10 @@ describe('cursor chain invalidation', () => {
       identity: 'filter',
       query: (after, request) => Effect.gen(function*() {
         yield* registry.invalidate({ store, tags: [{ type: 'TaskList' }] });
-        return yield* api.operations.page.runWithResult({
+        return yield* api.endpoints.page.runWithResult({
           store,
           variables: { after },
           fence: { identity: pagination.key(request.identity), requestId: request.requestId },
-          execute: async () => ({ ids: ['new'], cursor: 'two' }),
         });
       }),
     }));
